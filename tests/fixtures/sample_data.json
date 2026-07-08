@@ -1,0 +1,140 @@
+{
+  "count": 12,
+  "next": null,
+  "previous": null,
+  "results": [
+    {
+      "id": 1,
+      "sampling_rate": null,
+      "timestamp": "2026-07-08T08:00:00Z",
+      "location": {"id": 10, "latitude": "-1.2921", "longitude": "36.8219", "country": "KE", "city": "Nairobi"},
+      "sensor": {"id": 100, "pin": "1", "sensor_type": {"id": 14, "name": "SDS011", "manufacturer": "Nova Fitness"}},
+      "sensordatavalues": [
+        {"id": 1, "value": "18.4", "value_type": "P2"},
+        {"id": 2, "value": "31.0", "value_type": "P1"}
+      ]
+    },
+    {
+      "id": 2,
+      "sampling_rate": null,
+      "timestamp": "2026-07-08T08:10:00Z",
+      "location": {"id": 10, "latitude": "-1.2921", "longitude": "36.8219", "country": "KE", "city": "Nairobi"},
+      "sensor": {"id": 100, "pin": "1", "sensor_type": {"id": 14, "name": "SDS011", "manufacturer": "Nova Fitness"}},
+      "sensordatavalues": [
+        {"id": 3, "value": "20.1", "value_type": "P2"},
+        {"id": 4, "value": "35.5", "value_type": "P1"}
+      ]
+    },
+    {
+      "id": 3,
+      "sampling_rate": null,
+      "timestamp": "2026-07-08T08:20:00Z",
+      "location": {"id": 11, "latitude": "-1.3000", "longitude": "36.8000", "country": "KE", "city": "Nairobi"},
+      "sensor": {"id": 101, "pin": "1", "sensor_type": {"id": 14, "name": "SDS011", "manufacturer": "Nova Fitness"}},
+      "sensordatavalues": [
+        {"id": 5, "value": "24.9", "value_type": "P2"},
+        {"id": 6, "value": "40.2", "value_type": "P1"}
+      ]
+    },
+    {
+      "id": 4,
+      "sampling_rate": null,
+      "timestamp": "2026-07-08T08:30:00Z",
+      "location": {"id": 11, "latitude": "-1.3000", "longitude": "36.8000", "country": "KE", "city": "Nairobi"},
+      "sensor": {"id": 101, "pin": "1", "sensor_type": {"id": 14, "name": "SDS011", "manufacturer": "Nova Fitness"}},
+      "sensordatavalues": [
+        {"id": 7, "value": "28.3", "value_type": "P2"},
+        {"id": 8, "value": "44.7", "value_type": "P1"}
+      ]
+    },
+    {
+      "id": 5,
+      "sampling_rate": null,
+      "timestamp": "2026-07-08T08:05:00Z",
+      "location": {"id": 20, "latitude": "6.5244", "longitude": "3.3792", "country": "NG", "city": "Lagos"},
+      "sensor": {"id": 200, "pin": "1", "sensor_type": {"id": 14, "name": "SDS011", "manufacturer": "Nova Fitness"}},
+      "sensordatavalues": [
+        {"id": 9, "value": "55.2", "value_type": "P2"},
+        {"id": 10, "value": "88.9", "value_type": "P1"}
+      ]
+    },
+    {
+      "id": 6,
+      "sampling_rate": null,
+      "timestamp": "2026-07-08T08:15:00Z",
+      "location": {"id": 20, "latitude": "6.5244", "longitude": "3.3792", "country": "NG", "city": "Lagos"},
+      "sensor": {"id": 200, "pin": "1", "sensor_type": {"id": 14, "name": "SDS011", "manufacturer": "Nova Fitness"}},
+      "sensordatavalues": [
+        {"id": 11, "value": "60.7", "value_type": "P2"},
+        {"id": 12, "value": "95.1", "value_type": "P1"}
+      ]
+    },
+    {
+      "id": 7,
+      "sampling_rate": null,
+      "timestamp": "2026-07-08T08:25:00Z",
+      "location": {"id": 21, "latitude": "6.4500", "longitude": "3.4000", "country": "NG", "city": "Lagos"},
+      "sensor": {"id": 201, "pin": "1", "sensor_type": {"id": 14, "name": "SDS011", "manufacturer": "Nova Fitness"}},
+      "sensordatavalues": [
+        {"id": 13, "value": "48.8", "value_type": "P2"},
+        {"id": 14, "value": "77.3", "value_type": "P1"}
+      ]
+    },
+    {
+      "id": 8,
+      "sampling_rate": null,
+      "timestamp": "2026-07-08T08:12:00Z",
+      "location": {"id": 30, "latitude": "0.3476", "longitude": "32.5825", "country": "UG", "city": "Kampala"},
+      "sensor": {"id": 300, "pin": "1", "sensor_type": {"id": 14, "name": "SDS011", "manufacturer": "Nova Fitness"}},
+      "sensordatavalues": [
+        {"id": 15, "value": "35.0", "value_type": "P2"},
+        {"id": 16, "value": "58.6", "value_type": "P1"}
+      ]
+    },
+    {
+      "id": 9,
+      "sampling_rate": null,
+      "timestamp": "2026-07-08T08:22:00Z",
+      "location": {"id": 30, "latitude": "0.3476", "longitude": "32.5825", "country": "UG", "city": "Kampala"},
+      "sensor": {"id": 300, "pin": "1", "sensor_type": {"id": 14, "name": "SDS011", "manufacturer": "Nova Fitness"}},
+      "sensordatavalues": [
+        {"id": 17, "value": "37.4", "value_type": "P2"},
+        {"id": 18, "value": "61.2", "value_type": "P1"}
+      ]
+    },
+    {
+      "id": 10,
+      "sampling_rate": null,
+      "timestamp": "2026-07-08T08:28:00Z",
+      "location": {"id": 31, "latitude": "0.3400", "longitude": "32.6000", "country": "UG", "city": "Kampala"},
+      "sensor": {"id": 301, "pin": "1", "sensor_type": {"id": 22, "name": "DHT22", "manufacturer": "various"}},
+      "sensordatavalues": [
+        {"id": 19, "value": "24.5", "value_type": "temperature"},
+        {"id": 20, "value": "61.0", "value_type": "humidity"},
+        {"id": 21, "value": "33.1", "value_type": "P2"}
+      ]
+    },
+    {
+      "id": 11,
+      "sampling_rate": null,
+      "timestamp": "not-a-date",
+      "location": null,
+      "sensor": {},
+      "sensordatavalues": [
+        {"id": 22, "value": "garbage", "value_type": "P2"},
+        {"id": 23, "value": "-5", "value_type": "P1"}
+      ]
+    },
+    {
+      "id": 12,
+      "sampling_rate": null,
+      "timestamp": "2026-07-08T08:31:00Z",
+      "location": {"id": 40, "latitude": "-6.7924", "longitude": "39.2083", "country": "TZ", "city": "Dar es Salaam"},
+      "sensor": {"id": 400, "pin": "1", "sensor_type": {"id": 14, "name": "SDS011", "manufacturer": "Nova Fitness"}},
+      "sensordatavalues": [
+        {"id": 24, "value": "9999", "value_type": "P2"},
+        {"id": 25, "value": "12.3", "value_type": "P1"}
+      ]
+    }
+  ]
+}

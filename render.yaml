@@ -1,0 +1,23 @@
+# One-click deploy to Render (https://render.com).
+# Fork/connect the repo, then "New → Blueprint" and point at this file.
+services:
+  - type: web
+    name: sensors-africa-chatbot
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: SENSORS_API_BASE
+        value: https://api.sensors.africa
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: WHATSAPP_VERIFY_TOKEN
+        sync: false
+      - key: WHATSAPP_ACCESS_TOKEN
+        sync: false
+      - key: WHATSAPP_PHONE_NUMBER_ID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
