@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b3d2e">
+<meta name="description" content="Ask live air-quality questions about African cities — powered by the sensors.africa network.">
+<title>sensors.africa — Air Quality Chat</title>
+<style>
+  :root {
+    --bg: #f2efe9;
+    --ink: #1f2a24;
+    --brand: #0b3d2e;
+    --brand-2: #14614a;
+    --bot: #ffffff;
+    --user: #d7ecdf;
+    --muted: #6b7a72;
+    --radius: 18px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: Georgia, "Times New Roman", serif;
+    background: var(--bg);
+    color: var(--ink);
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    background: var(--brand);
+    color: #f5f1e6;
+    padding: calc(env(safe-area-inset-top) + 14px) 16px 14px;
+    display: flex; align-items: center; gap: 10px;
+    box-shadow: 0 2px 10px rgba(0,0,0,.15);
+  }
+  header .dot {
+    width: 12px; height: 12px; border-radius: 50%;
+    background: #7fd8a4; box-shadow: 0 0 0 4px rgba(127,216,164,.25);
+    flex: none;
+  }
+  header h1 { font-size: 1.05rem; font-weight: 600; letter-spacing: .2px; }
+  header p { font-size: .78rem; opacity: .85; font-style: italic; }
+  #chat {
+    flex: 1; overflow-y: auto; padding: 16px 12px 8px;
+    display: flex; flex-direction: column; gap: 10px;
+    -webkit-overflow-scrolling: touch;
+  }
+  .msg {
+    max-width: 86%; padding: 10px 14px; border-radius: var(--radius);
+    line-height: 1.45; font-size: .95rem; white-space: pre-wrap;
+    word-wrap: break-word; animation: pop .18s ease-out;
+  }
+  @keyframes pop { from { opacity: 0; transform: translateY(6px); } }
+  .bot  { background: var(--bot); align-self: flex-start; border-bottom-left-radius: 6px;
+          box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  .user { background: var(--user); align-self: flex-end; border-bottom-right-radius: 6px; }
+  .typing { color: var(--muted); font-style: italic; }
+  #chips {
+    display: flex; gap: 8px; overflow-x: auto; padding: 8px 12px;
+    scrollbar-width: none;
+  }
+  #chips::-webkit-scrollbar { display: none; }
+  .chip {
+    flex: none; border: 1px solid var(--brand-2); color: var(--brand-2);
+    background: transparent; border-radius: 999px; padding: 7px 14px;
+    font-size: .82rem; font-family: inherit; cursor: pointer;
+  }
+  .chip:active { background: var(--user); }
+  form {
+    display: flex; gap: 8px;
+    padding: 10px 12px calc(env(safe-area-inset-bottom) + 10px);
+    background: var(--bg); border-top: 1px solid #ddd6c8;
+  }
+  input[type=text] {
+    flex: 1; padding: 12px 16px; border: 1px solid #cfc7b6;
+    border-radius: 999px; font-size: 16px; font-family: inherit;
+    background: #fff; outline: none;
+  }
+  input[type=text]:focus { border-color: var(--brand-2); }
+  button[type=submit] {
+    background: var(--brand); color: #fff; border: 0; border-radius: 999px;
+    width: 46px; height: 46px; font-size: 1.1rem; cursor: pointer; flex: none;
+  }
+  button[type=submit]:disabled { opacity: .5; }
+  footer.credit {
+    text-align: center; font-size: .7rem; color: var(--muted);
+    padding: 0 12px 6px; background: var(--bg);
+  }
+  footer.credit a { color: var(--brand-2); }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot"></span>
+  <div>
+    <h1>sensors.africa air quality</h1>
+    <p>ask the sensors anything — no app, no server</p>
+  </div>
+</header>
+
+<div id="chat" aria-live="polite"></div>
+
+<div id="chips">
+  <button class="chip">Air quality in Nairobi</button>
+  <button class="chip">Safe for kids to walk to school in Lagos?</button>
+  <button class="chip">Most polluted city right now</button>
+  <button class="chip">Compare Nairobi and Kampala</button>
+  <button class="chip">What is PM2.5?</button>
+  <button class="chip">List cities</button>
+</div>
+
+<form id="composer" autocomplete="off">
+  <input id="box" type="text" placeholder="Ask about the air in your city…"
+         maxlength="500" aria-label="Message">
+  <button type="submit" aria-label="Send">➤</button>
+</form>
+<footer class="credit">
+  Live data from <a href="https://sensors.africa" rel="noopener">sensors.africa</a>,
+  a Code for Africa project · runs entirely in your browser
+</footer>
+
+<script>
+"use strict";
+/* ============================================================
+   sensors.africa chatbot — fully client-side edition.
+   Everything (intent parsing, statistics, AQI, health advice)
+   runs in the browser; data is fetched straight from
+   api.sensors.africa. Host this file anywhere static
+   (GitHub Pages works) and you have a working chatbot.
+   URL params: ?q=<question> auto-asks on load;
+               ?api=<base-url> overrides the API (for testing).
+   ============================================================ */
+
+const PARAMS = new URLSearchParams(location.search);
+const API_BASE = PARAMS.get("api") || "https://api.sensors.africa";
+const DATA_URL = API_BASE + "/v2/data/";
+const MAX_PAGES = 3;
+const CACHE_TTL_MS = 5 * 60 * 1000;
+
+const KNOWN_CITIES = [
+  "Nairobi","Lagos","Dar es Salaam","Accra","Kampala","Addis Ababa",
+  "Johannesburg","Cape Town","Durban","Pretoria","Abuja","Port Harcourt",
+  "Mombasa","Kisumu","Nakuru","Dodoma","Arusha","Mwanza","Bamako",
+  "Yaoundé","Douala","Kinshasa","Lubumbashi","Abidjan","Dakar",
+  "Ouagadougou","Lomé","Cotonou","Kigali","Bujumbura","Lusaka",
+  "Harare","Gaborone","Windhoek","Maputo","Antananarivo","Port Louis",
+  "Cairo","Alexandria","Tunis","Algiers","Casablanca","Monrovia",
+  "Freetown","Banjul","Niamey","N'Djamena","Juba","Khartoum","Asmara",
+  "Djibouti","Mogadishu","Lilongwe","Blantyre","Beira","Stone Town"
+];
+
+/* ---------- AQI (US EPA breakpoints; 2024 PM2.5 revision) ---------- */
+
+const PM25_BP = [[0.0,9.0,0,50],[9.1,35.4,51,100],[35.5,55.4,101,150],
+                 [55.5,125.4,151,200],[125.5,225.4,201,300],[225.5,500.4,301,500]];
+const PM10_BP = [[0,54,0,50],[55,154,51,100],[155,254,101,150],
+                 [255,354,151,200],[355,424,201,300],[425,604,301,500]];
+const CATEGORIES = [[50,"Good","🟢"],[100,"Moderate","🟡"],
+  [150,"Unhealthy for sensitive groups","🟠"],[200,"Unhealthy","🔴"],
+  [300,"Very unhealthy","🟣"],[500,"Hazardous","🟤"]];
+const WHO_PM25 = 15, WHO_PM10 = 45;
+
+const ADVICE = {
+  general: [
+    "Air quality is good — enjoy outdoor activities.",
+    "Air quality is acceptable. Unusually sensitive people should consider shorter outdoor exertion.",
+    "Sensitive groups (children, elderly, people with asthma or heart conditions) should reduce prolonged outdoor exertion.",
+    "Everyone should reduce prolonged outdoor exertion. Sensitive groups should stay indoors where possible.",
+    "Avoid outdoor exertion. Keep windows closed; wear a well-fitting mask (e.g. N95) if you must go out.",
+    "Health emergency conditions. Everyone should stay indoors with windows closed."
+  ],
+  children: [
+    "It's a good time for kids to walk, play and be outside.",
+    "Fine for the walk to school. If your child has asthma, keep their inhaler handy.",
+    "Limit your child's time outdoors and choose calmer activities. Children breathe faster and take in more polluted air.",
+    "Keep children indoors where possible; if they must be outside, keep it brief and avoid busy roads.",
+    "Keep children indoors with windows closed. A well-fitting mask helps for unavoidable trips.",
+    "Keep children indoors. Seek medical help promptly if a child has trouble breathing."
+  ],
+  exercise: [
+    "Great conditions for a run or outdoor workout.",
+    "Fine for exercise. Very sensitive people may prefer lighter sessions.",
+    "Consider a shorter or less intense workout, ideally away from traffic, or exercise indoors.",
+    "Move your workout indoors — heavy breathing multiplies the pollution dose.",
+    "Do not exercise outdoors.",
+    "Do not exercise outdoors."
+  ],
+  outdoor_workers: [
+    "Normal working conditions.",
+    "Normal working conditions for most people.",
+    "Take more breaks away from traffic; workers with asthma should keep medication close.",
+    "Reduce heavy outdoor labour where possible; a well-fitting mask (N95) helps.",
+    "Limit outdoor shifts and wear a well-fitting respirator mask.",
+    "Outdoor work should stop except for emergencies."
+  ]
+};
+
+function interpolate(conc, bps) {
+  const top = bps[bps.length - 1];
+  if (conc >= top[1]) return top[3];
+  for (const [cl, ch, al, ah] of bps) {
+    if (conc >= cl && conc <= ch) return Math.round((ah - al) / (ch - cl) * (conc - cl) + al);
+  }
+  return 0;
+}
+function categoryFor(aqi) {
+  for (let i = 0; i < CATEGORIES.length; i++) {
+    if (aqi <= CATEGORIES[i][0]) return {index: i, name: CATEGORIES[i][1], emoji: CATEGORIES[i][2]};
+  }
+  return {index: 5, name: "Hazardous", emoji: "🟤"};
+}
+function aqiFrom(pm25, pm10) {
+  const results = [];
+  if (pm25 != null) results.push({aqi: interpolate(Math.max(0, Math.round(pm25*10)/10), PM25_BP), pollutant: "PM2.5"});
+  if (pm10 != null) results.push({aqi: interpolate(Math.max(0, Math.round(pm10)), PM10_BP), pollutant: "PM10"});
+  if (!results.length) return null;
+  const worst = results.reduce((a, b) => b.aqi > a.aqi ? b : a);
+  return Object.assign(worst, categoryFor(worst.aqi));
+}
+function whoLine(pm25, pm10) {
+  const parts = [];
+  if (pm25 != null) parts.push(pm25 > WHO_PM25
+    ? `PM2.5 is ${(pm25/WHO_PM25).toFixed(1)}× the WHO daily guideline (${WHO_PM25} µg/m³)`
+    : "PM2.5 is within the WHO daily guideline");
+  if (pm10 != null) parts.push(pm10 > WHO_PM10
+    ? `PM10 is ${(pm10/WHO_PM10).toFixed(1)}× the WHO daily guideline (${WHO_PM10} µg/m³)`
+    : "PM10 is within the WHO daily guideline");
+  return parts.length ? parts.join("; ") + "." : "";
+}
+
+/* ---------- data client (fetch + parse + cache) ---------- */
+
+const cache = new Map();
+function cacheGet(key) {
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.t < CACHE_TTL_MS) return hit.v;
+  return null;
+}
+
+function toNum(v) {
+  const f = parseFloat(v);
+  if (!isFinite(f) || f < 0 || f > 5000) return null;   // sentinel/garbage filter
+  return f;
+}
+
+function parseRecord(rec) {
+  if (!rec || typeof rec !== "object") return null;
+  const loc = rec.location || {};
+  const values = {};
+  for (const d of rec.sensordatavalues || []) {
+    if (d && d.value_type != null) {
+      const v = toNum(d.value);
+      if (v != null) values[d.value_type] = v;
+    }
+  }
+  for (const k of ["P0","P1","P2"]) {
+    if (rec[k] != null && values[k] == null) {
+      const v = toNum(rec[k]);
+      if (v != null) values[k] = v;
+    }
+  }
+  if (!Object.keys(values).length) return null;
+  const ts = Date.parse(rec.timestamp || "");
+  return {
+    city: String(loc.city || rec.city || ""),
+    country: String(loc.country || rec.country || ""),
+    ts: isNaN(ts) ? null : ts,
+    lat: parseFloat(loc.latitude), lon: parseFloat(loc.longitude),
+    values
+  };
+}
+
+async function fetchReadings(city) {
+  const key = "r:" + (city || "").toLowerCase();
+  const hit = cacheGet(key);
+  if (hit) return hit;
+  const readings = [];
+  let url = DATA_URL + "?" + new URLSearchParams({city: city || "", country: "", type: ""});
+  for (let page = 0; page < MAX_PAGES && url; page++) {
+    const res = await fetch(url, {headers: {Accept: "application/json"}});
+    if (!res.ok) throw new Error("API returned " + res.status);
+    const payload = await res.json();
+    const records = Array.isArray(payload) ? payload : (payload.results || []);
+    url = Array.isArray(payload) ? null : payload.next;
+    for (const rec of records) {
+      const r = parseRecord(rec);
+      if (r) readings.push(r);
+    }
+  }
+  cache.set(key, {t: Date.now(), v: readings});
+  return readings;
+}
+
+/* ---------- statistics ---------- */
+
+const mean = a => a.reduce((s, x) => s + x, 0) / a.length;
+const rnd1 = x => Math.round(x * 10) / 10;
+const vals = (rs, k) => rs.filter(r => k in r.values).map(r => r.values[k]);
+
+function summarize(readings, city) {
+  const pm25 = vals(readings, "P2"), pm10 = vals(readings, "P1");
+  const stamps = readings.filter(r => r.ts).map(r => r.ts);
+  const locs = new Set(readings.filter(r => isFinite(r.lat)).map(r => r.lat + "," + r.lon));
+  return {
+    city: city || (readings[0] && readings[0].city) || "",
+    n: readings.length,
+    sensors: locs.size || (readings.length ? 1 : 0),
+    pm25: pm25.length ? rnd1(mean(pm25)) : null,
+    pm25min: pm25.length ? rnd1(Math.min(...pm25)) : null,
+    pm25max: pm25.length ? rnd1(Math.max(...pm25)) : null,
+    pm10: pm10.length ? rnd1(mean(pm10)) : null,
+    latest: stamps.length ? new Date(Math.max(...stamps)) : null
+  };
+}
+
+function trendOf(readings) {
+  const timed = readings.filter(r => r.ts && "P2" in r.values).sort((a, b) => a.ts - b.ts);
+  if (timed.length < 4) return null;
+  const mid = Math.floor(timed.length / 2);
+  const early = mean(timed.slice(0, mid).map(r => r.values.P2));
+  const late = mean(timed.slice(mid).map(r => r.values.P2));
+  if (!early) return null;
+  const change = (late - early) / early * 100;
+  return {
+    dir: Math.abs(change) < 10 ? "steady" : change > 0 ? "rising" : "falling",
+    change: Math.round(change), early: rnd1(early), late: rnd1(late), n: timed.length
+  };
+}
+
+function rankCities(readings) {
+  const byCity = {};
+  for (const r of readings) {
+    if (r.city && "P2" in r.values) {
+      const name = r.city.trim().replace(/\b\w/g, c => c.toUpperCase());
+      (byCity[name] = byCity[name] || []).push(r.values.P2);
+    }
+  }
+  return Object.entries(byCity)
+    .filter(([, v]) => v.length >= 3)
+    .map(([c, v]) => [c, rnd1(mean(v)), v.length])
+    .sort((a, b) => b[1] - a[1]);
+}
+
+/* ---------- NLU ---------- */
+
+const strip = s => s.normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase();
+
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  if (!m || !n) return Math.max(m, n);
+  let prev = Array.from({length: n + 1}, (_, i) => i);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j-1] + 1, prev[j-1] + (a[i-1] === b[j-1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+
+function extractCities(msg) {
+  const norm = strip(msg);
+  const found = [];
+  for (const city of KNOWN_CITIES) {
+    const idx = norm.indexOf(strip(city));
+    if (idx >= 0) found.push([idx, city]);
+  }
+  if (!found.length) {
+    const words = norm.match(/[a-z][a-z'-]{3,}/g) || [];
+    for (let i = 0; i < words.length; i++) {
+      for (const city of KNOWN_CITIES) {
+        if (city.includes(" ")) continue;
+        const c = strip(city);
+        const dist = levenshtein(words[i], c);
+        if (dist > 0 && dist <= Math.floor(c.length / 5) + 1 && words[i].length > 3
+            && 1 - dist / Math.max(c.length, words[i].length) >= 0.8) {
+          found.push([i, city]);
+        }
+      }
+    }
+  }
+  const seen = new Set(), out = [];
+  for (const [, city] of found.sort((a, b) => a[0] - b[0])) {
+    if (!seen.has(city)) { seen.add(city); out.push(city); }
+  }
+  return out.slice(0, 2);
+}
+
+const RX = {
+  greeting: /^\s*(hi|hello|hey|hallo|habari|jambo|mambo|sasa|salut|bonjour|good\s*(morning|afternoon|evening)|start)\b/i,
+  help: /\b(help|menu|options|what can you do|how do(es)? this work)\b/i,
+  thanks: /\b(thanks?|thank you|asante|merci|shukran)\b/i,
+  compare: /\b(compare|versus|vs\.?|difference between|worse than|better than|cleaner than)\b/i,
+  worst: /\b(worst|most polluted|dirtiest|highest pollution|highest pm)\b/i,
+  best: /\b(best|cleanest|least polluted|lowest pollution|lowest pm)\b/i,
+  trend: /\b(trend|trending|improv|getting (better|worse)|chang(e|ing)|over time|history|past)\b/i,
+  cities: /\b(which|what|list)\b.*\b(cities|city|places|locations)\b|\bcities\b\s*$/i,
+  explain: /\b(what is|what's|whats|explain|meaning of|define)\b/i,
+  air: /\b(air|aqi|pollution|pm\s?2\.?5|pm\s?10|dust|smog|quality|breathe|breathing)\b/i,
+  health: /\b(safe|ok to|okay to|should i|can i|advice|health|mask|asthma|risk|danger|harmful)\b/i
+};
+const AUDIENCES = [
+  ["children", /\b(child|children|kid|kids|school|baby|toddler|son|daughter)\b/i],
+  ["exercise", /\b(run|running|jog|jogging|exercise|workout|cycle|cycling|sport|training|gym)\b/i],
+  ["outdoor_workers", /\b(work outside|outdoor work|trader|market|vendor|boda|farmer|construction|hawker)\b/i]
+];
+const TOPICS = [
+  ["pm25", /pm\s?2\.?5/i], ["pm10", /pm\s?10/i],
+  ["aqi", /\baqi\b|air quality index/i], ["sensors", /\bsensor(s)?\b|sensors\.africa|network/i]
+];
+
+function parseIntent(message, lastCity) {
+  const text = (message || "").trim();
+  if (!text) return {name: "help"};
+  const cities = extractCities(text);
+  const city = cities[0] || null, second = cities[1] || null;
+  let audience = "general";
+  for (const [name, rx] of AUDIENCES) if (rx.test(text)) { audience = name; break; }
+
+  if (RX.greeting.test(text) && text.length < 40 && !city) return {name: "greeting"};
+  if (RX.help.test(text)) return {name: "help"};
+  if (RX.thanks.test(text) && text.length < 40) return {name: "thanks"};
+  if (RX.compare.test(text) && (second || (city && lastCity && city !== lastCity)))
+    return {name: "compare", city, second: second || lastCity};
+  if (RX.worst.test(text) && !city) return {name: "rank", order: "worst"};
+  if (RX.best.test(text) && !city) return {name: "rank", order: "best"};
+  if (RX.cities.test(text) && !city) return {name: "list_cities"};
+  const eff = city || lastCity;
+  if (RX.trend.test(text) && (eff || RX.air.test(text))) return {name: "trend", city: eff};
+  if (RX.health.test(text) && (eff || RX.air.test(text) || audience !== "general"))
+    return {name: "health", city: eff, audience};
+  if (RX.explain.test(text)) {
+    for (const [topic, rx] of TOPICS) if (rx.test(text)) return {name: "explain", topic};
+    if (!city) return {name: "unknown"};
+  }
+  if (city) return {name: "air_quality", city, audience};
+  if (RX.air.test(text)) return lastCity
+    ? {name: "air_quality", city: lastCity, audience}
+    : {name: "ask_city"};
+  return {name: "unknown"};
+}
+
+/* ---------- responder ---------- */
+
+const HELP_TEXT =
+  'I turn live air-quality data from sensors.africa into plain answers. Try:\n' +
+  '• "Air quality in Nairobi"\n' +
+  '• "Is it safe for my kids to walk to school in Lagos?"\n' +
+  '• "Compare Nairobi and Kampala"\n' +
+  '• "Which city is most polluted right now?"\n' +
+  '• "Is the air in Accra getting better?"\n' +
+  '• "What is PM2.5?"\n' +
+  '• "List cities"';
+
+const EXPLAINERS = {
+  pm25: "PM2.5 is fine dust smaller than 2.5 micrometres — about 30× thinner than a human hair. It comes from traffic, cooking fires, dust and burning waste, and it's the most dangerous common pollutant because it goes deep into the lungs and bloodstream. The WHO says 24-hour average exposure should stay under 15 µg/m³. Ask me for a city to see live PM2.5 levels.",
+  pm10: "PM10 is inhalable dust smaller than 10 micrometres — think road dust, construction and smoke. It irritates the nose, throat and lungs. The WHO guideline is a 24-hour average under 45 µg/m³. Ask me for a city to see live PM10 levels.",
+  aqi: "The Air Quality Index turns pollution measurements into one 0–500 score: 🟢 0–50 good, 🟡 51–100 moderate, 🟠 101–150 unhealthy for sensitive groups, 🔴 151–200 unhealthy, 🟣 201–300 very unhealthy, 🟤 301+ hazardous. I calculate it from live PM2.5 and PM10 sensor readings.",
+  sensors: "sensors.africa is a citizen-science network of low-cost air-quality sensors across African cities, run by Code for Africa. The sensors report dust levels (PM2.5 and PM10) every few minutes, and I read that live feed to answer your questions. Data: api.sensors.africa"
+};
+
+let lastCity = null;
+
+function fmtFresh(s) {
+  if (!s.latest) return "";
+  const opts = {day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "UTC"};
+  return ` (latest reading ${s.latest.toLocaleString("en-GB", opts)} UTC)`;
+}
+const noData = city =>
+  `I couldn't find recent readings for ${city}. The sensors there may be offline. ` +
+  'Send "list cities" to see where data is coming in right now.';
+
+async function snapshot(city) {
+  const readings = await fetchReadings(city);
+  if (!readings.length) return null;
+  const s = summarize(readings, city);
+  return {s, a: aqiFrom(s.pm25, s.pm10), readings};
+}
+
+async function answer(message) {
+  const intent = parseIntent(message, lastCity);
+  if (intent.city) lastCity = intent.city;
+
+  switch (intent.name) {
+    case "greeting":
+      return '👋 Hello! I\'m the sensors.africa air-quality bot. Ask me about the air in your city — for example "How is the air in Nairobi?" or "Is it safe to run in Lagos today?" Send "help" for more examples.';
+    case "help": return HELP_TEXT;
+    case "thanks": return "You're welcome! Breathe easy 🌍 Ask me anytime.";
+    case "ask_city":
+      return 'Which city are you asking about? For example: "air quality in Nairobi". Send "list cities" to see where we have sensors.';
+    case "explain": return EXPLAINERS[intent.topic] || HELP_TEXT;
+
+    case "list_cities": {
+      const readings = await fetchReadings("");
+      const live = [...new Set(readings.filter(r => r.city.trim())
+        .map(r => r.city.trim().replace(/\b\w/g, c => c.toUpperCase())))].sort();
+      if (live.length)
+        return `Cities reporting data right now: ${live.slice(0, 25).join(", ")}.\nAsk me about any of them, e.g. "air in ${live[0]}".`;
+      return "Cities in the sensors.africa network include: " + KNOWN_CITIES.slice(0, 25).join(", ") + ". Ask me about any of them.";
+    }
+
+    case "air_quality": {
+      const snap = await snapshot(intent.city);
+      if (!snap) return noData(intent.city);
+      const {s, a} = snap;
+      const lines = [`📍 ${s.city}${fmtFresh(s)}`];
+      if (a) lines.push(`${a.emoji} AQI ${a.aqi} — ${a.name}`);
+      if (s.pm25 != null) lines.push(`PM2.5: ${s.pm25} µg/m³ (range ${s.pm25min}–${s.pm25max} across ${s.sensors} sensor location(s))`);
+      if (s.pm10 != null) lines.push(`PM10: ${s.pm10} µg/m³`);
+      const who = whoLine(s.pm25, s.pm10);
+      if (who) lines.push(who);
+      if (a) lines.push("💡 " + ADVICE[intent.audience || "general"][a.index]);
+      return lines.join("\n");
+    }
+
+    case "health": {
+      if (!intent.city) return 'Which city are you asking about? For example: "is it safe to run in Nairobi?"';
+      const snap = await snapshot(intent.city);
+      if (!snap || !snap.a) return noData(intent.city);
+      const {s, a} = snap;
+      return `📍 ${s.city}: ${a.emoji} AQI ${a.aqi} — ${a.name} (PM2.5 ${s.pm25} µg/m³)\n💡 ${ADVICE[intent.audience][a.index]}`;
+    }
+
+    case "trend": {
+      if (!intent.city) return 'Which city are you asking about? For example: "is the air in Nairobi improving?"';
+      const readings = await fetchReadings(intent.city);
+      const t = trendOf(readings);
+      if (!t) return `I don't have enough timestamped readings from ${intent.city} right now to compute a trend. Try asking for the current air quality instead.`;
+      const arrow = {rising: "📈 worsening", falling: "📉 improving", steady: "➡️ steady"}[t.dir];
+      return `PM2.5 in ${intent.city} is ${arrow} over the most recent readings: ${t.early} → ${t.late} µg/m³ (${t.change > 0 ? "+" : ""}${t.change}%, based on ${t.n} readings). Note this reflects the latest data window, not a long-term climate trend.`;
+    }
+
+    case "compare": {
+      if (!intent.city || !intent.second)
+        return 'Tell me two cities to compare, e.g. "compare Nairobi and Lagos".';
+      const [sa, sb] = await Promise.all([snapshot(intent.city), snapshot(intent.second)]);
+      if (!sa) return noData(intent.city);
+      if (!sb) return noData(intent.second);
+      const lines = ["⚖️ Air quality comparison (mean PM2.5):"];
+      for (const {s, a} of [sa, sb])
+        lines.push(`${a ? a.emoji : "•"} ${s.city}: ${s.pm25} µg/m³ (${a ? "AQI " + a.aqi : "AQI n/a"})`);
+      if (sa.s.pm25 != null && sb.s.pm25 != null) {
+        if (Math.abs(sa.s.pm25 - sb.s.pm25) < 2) lines.push("Both cities currently have similar air.");
+        else {
+          const [clean, dirty] = sa.s.pm25 < sb.s.pm25 ? [sa.s, sb.s] : [sb.s, sa.s];
+          const ratio = clean.pm25 ? (dirty.pm25 / clean.pm25).toFixed(1) : null;
+          lines.push(`${clean.city} currently has cleaner air` + (ratio ? ` — about ${ratio}× lower PM2.5.` : "."));
+        }
+      }
+      return lines.join("\n");
+    }
+
+    case "rank": {
+      const readings = await fetchReadings("");
+      const ranked = rankCities(readings);
+      if (!ranked.length)
+        return "I couldn't rank cities right now — the live feed didn't return enough city-tagged readings. Try asking about a specific city instead.";
+      const top = intent.order === "worst" ? ranked.slice(0, 5) : ranked.slice(-5).reverse();
+      const lines = [intent.order === "worst"
+        ? "😷 Most polluted cities right now (mean PM2.5):"
+        : "🌿 Cleanest cities right now (mean PM2.5):"];
+      top.forEach(([city, value], i) => {
+        const a = aqiFrom(value, null);
+        lines.push(`${i + 1}. ${a ? a.emoji : "•"} ${city}: ${value} µg/m³`);
+      });
+      lines.push("Based on the latest readings from the sensors.africa network.");
+      return lines.join("\n");
+    }
+
+    default:
+      return "I'm not sure how to answer that one.\n\n" + HELP_TEXT;
+  }
+}
+
+/* ---------- UI wiring ---------- */
+
+const chat = document.getElementById("chat");
+const form = document.getElementById("composer");
+const box = document.getElementById("box");
+const send = form.querySelector("button");
+
+function add(text, who) {
+  const el = document.createElement("div");
+  el.className = "msg " + who;
+  el.textContent = text;
+  chat.appendChild(el);
+  chat.scrollTop = chat.scrollHeight;
+  return el;
+}
+
+async function ask(message) {
+  add(message, "user");
+  const typing = add("checking the sensors…", "bot typing");
+  send.disabled = true;
+  try {
+    const reply = await answer(message);
+    typing.remove();
+    add(reply, "bot");
+  } catch (err) {
+    typing.remove();
+    add("I couldn't reach the sensors.africa data service (" + (err && err.message || "network error") +
+        "). Please check your connection and try again in a moment.", "bot");
+  } finally {
+    send.disabled = false;
+    box.focus();
+  }
+}
+
+form.addEventListener("submit", e => {
+  e.preventDefault();
+  const message = box.value.trim();
+  if (!message) return;
+  box.value = "";
+  ask(message);
+});
+
+document.getElementById("chips").addEventListener("click", e => {
+  if (e.target.classList.contains("chip")) ask(e.target.textContent);
+});
+
+add('👋 Hello! I turn live air-quality data from sensors across African cities ' +
+    'into plain answers — right here in your browser. Try a suggestion below, or ' +
+    'ask me anything — like "Is it safe to run in Nairobi today?"', "bot");
+
+// Shareable questions: .../index.html?q=air+quality+in+nairobi
+const q = PARAMS.get("q");
+if (q) ask(q);
+</script>
+</body>
+</html>
