@@ -11,6 +11,11 @@ services:
     envVars:
       - key: SENSORS_API_BASE
         value: https://api.sensors.africa
+      # Secret — Render prompts for this at deploy; never stored in the repo.
+      - key: SENSORS_API_KEY
+        sync: false
+      - key: SENSORS_API_KEY_SCHEME
+        value: Token
       - key: ANTHROPIC_API_KEY
         sync: false
       - key: WHATSAPP_VERIFY_TOKEN

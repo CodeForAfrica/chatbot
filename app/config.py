@@ -7,6 +7,31 @@ Copy .env.example to .env (or export variables) to customise.
 import os
 
 
+def _load_dotenv() -> None:
+    """Best-effort loader for a local .env file (no external dependency).
+
+    Only fills variables that aren't already set in the environment, so a
+    real deployment secret always wins over the file. .env is gitignored and
+    must never contain a committed key.
+    """
+    path = os.path.join(os.getcwd(), ".env")
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+    except OSError:
+        pass
+
+
+_load_dotenv()
+
+
 def _int(name: str, default: int) -> int:
     try:
         return int(os.environ.get(name, default))
@@ -21,6 +46,14 @@ SENSORS_CITIES_URL = os.environ.get("SENSORS_CITIES_URL", f"{SENSORS_API_BASE}/v
 # How many pages of /v2/data/ to walk per query (each page is ~100 records).
 SENSORS_MAX_PAGES = _int("SENSORS_MAX_PAGES", 3)
 SENSORS_TIMEOUT_SECONDS = _int("SENSORS_TIMEOUT_SECONDS", 20)
+# API key/token for the sensors.africa API, supplied via a deployment secret.
+# NEVER commit the value — leave this empty in the repo and set it in the
+# host's environment (Render env var, GitHub Actions secret, or local .env).
+SENSORS_API_KEY = os.environ.get("SENSORS_API_KEY", "")
+# Authorization header scheme. sensors.africa uses Django REST Framework token
+# auth ("Authorization: Token <key>"). Set to "Bearer" for bearer tokens, or
+# empty to send the raw key with no scheme prefix.
+SENSORS_API_KEY_SCHEME = os.environ.get("SENSORS_API_KEY_SCHEME", "Token")
 # Cache API responses for this long so a busy chatbot doesn't hammer the API.
 CACHE_TTL_SECONDS = _int("CACHE_TTL_SECONDS", 300)
 

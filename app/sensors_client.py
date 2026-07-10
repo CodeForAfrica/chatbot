@@ -86,6 +86,23 @@ def _to_float(value) -> Optional[float]:
     return f
 
 
+def _auth_headers() -> dict:
+    """Request headers, including the API key when one is configured.
+
+    The key is read from config (i.e. the environment) at call time and never
+    logged — logging is limited to status codes and URLs elsewhere.
+    """
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "sensors-africa-chatbot/0.1 (+https://sensors.africa)",
+    }
+    if config.SENSORS_API_KEY:
+        scheme = config.SENSORS_API_KEY_SCHEME.strip()
+        value = f"{scheme} {config.SENSORS_API_KEY}".strip() if scheme else config.SENSORS_API_KEY
+        headers["Authorization"] = value
+    return headers
+
+
 def _parse_timestamp(value) -> Optional[datetime]:
     if not value or not isinstance(value, str):
         return None
@@ -185,7 +202,7 @@ class SensorsClient:
 
         params = {"city": city, "country": country, "type": value_type}
         readings: list[Reading] = []
-        async with httpx.AsyncClient(follow_redirects=True) as client:
+        async with httpx.AsyncClient(follow_redirects=True, headers=_auth_headers()) as client:
             url: Optional[str] = self.data_url
             for page in range(max_pages):
                 if not url:
@@ -220,7 +237,7 @@ class SensorsClient:
 
         cities = set(KNOWN_CITIES)
         try:
-            async with httpx.AsyncClient(follow_redirects=True) as client:
+            async with httpx.AsyncClient(follow_redirects=True, headers=_auth_headers()) as client:
                 payload = await self._get_json(client, self.cities_url)
             items = payload.get("results", payload) if isinstance(payload, dict) else payload
             if isinstance(items, list):
