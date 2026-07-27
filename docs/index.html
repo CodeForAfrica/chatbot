@@ -241,10 +241,11 @@ function whoLine(pm25, pm10) {
 }
 
 /* ---------- data layer (static aggregates → per-city averages) ----------
-   One fetch of a static file answers every city: we group all sensor
-   records by location.city and average PM2.5 (P2) and PM10 (P1) per city,
-   weighted by each reading's "samples". Rankings, comparisons and snapshots
-   all read from that single grouped dataset. */
+   Each static file (5-min dust, 1-hour, 24-hour) is grouped by location.city
+   into sample-weighted PM2.5 (P2) / PM10 (P1) means. For a given city we
+   cascade freshest-first — 5-min, then 1-hour, then 24-hour — and lazily
+   fetch the coarser files only when a finer one lacks the requested city.
+   Each file is cached for CACHE_TTL_MS. */
 
 const cache = new Map();
 function cacheGet(key) {
@@ -352,33 +353,20 @@ async function ensureCitiesLoaded() {
   }
 }
 
-// Grouped current data: 5-minute dust file, falling back to the 1-hour file
-// if it's empty or errors (a CORS failure is re-thrown, since the same-origin
-// fallback would fail identically and the UI should report it). Returns
-// {map, basis}. Cached per CACHE_TTL_MS.
-async function getSource(which) {
-  const ck = "src:" + which;
+// Group one window's static file, cached per CACHE_TTL_MS. Lazily fetched:
+// citySnapshot only reaches for a coarser window when a finer one lacks the
+// city. Throws on fetch failure (cors/http) so callers decide skip vs report.
+const WINDOW_URL = {"5min": DUST_URL, "1h": HOUR_URL, "24h": DAY_URL};
+
+async function getGrouped(which) {
+  const ck = "grp:" + which;
   const hit = cacheGet(ck);
   if (hit) return hit;
   await ensureCitiesLoaded();
-  let records, basis;
-  if (which === "24h") {
-    records = await fetchJson(DAY_URL);
-    basis = "24-hour network average";
-  } else {
-    try {
-      records = await fetchJson(DUST_URL);
-      basis = "5-minute network average";
-      if (!Array.isArray(records) || !records.length) throw new Error("empty");
-    } catch (e) {
-      if (e && e.kind === "cors") throw e;
-      records = await fetchJson(HOUR_URL);  // may throw → propagates to the UI
-      basis = "1-hour network average";
-    }
-  }
-  const val = {map: groupByCity(Array.isArray(records) ? records : []), basis};
-  cache.set(ck, {t: Date.now(), v: val});
-  return val;
+  const records = await fetchJson(WINDOW_URL[which]);
+  const map = groupByCity(Array.isArray(records) ? records : []);
+  cache.set(ck, {t: Date.now(), v: map});
+  return map;
 }
 
 // Map a user's city string to a grouped-map key via the alias lookup.
@@ -388,12 +376,41 @@ function cityKey(input) {
   return strip(display);
 }
 
-// Cities worst-first by mean PM2.5, from a single grouped map.
-function rankFromMap(map) {
-  return [...map.values()]
-    .filter(g => g.pm25 != null)
-    .map(g => [g.display, g.pm25, g.sensors])
-    .sort((a, b) => b[1] - a[1]);
+// True if the city is in the loaded /v2/cities/ list, so we can say "sensors
+// appear offline" instead of "may not be in the network". False if the cities
+// list didn't load (then we can't tell, and use the softer phrasing).
+function cityInNetwork(input) {
+  return CITY_LOOKUP.has(strip(input));
+}
+
+// Merge all reachable windows into one per-city view, freshest window winning
+// (5-min > 1-hour > 24-hour). Used by rankings. Skips a window that errors;
+// re-throws a CORS failure so the UI can report it.
+async function combinedCityMap() {
+  const merged = new Map();
+  for (const which of ["5min", "1h", "24h"]) {
+    let map;
+    try { map = await getGrouped(which); }
+    catch (e) { if (e && e.kind === "cors") throw e; continue; }
+    for (const [key, g] of map) {
+      if (merged.has(key)) continue;                 // a finer window already set this city
+      if (g.pm25 == null && g.pm10 == null) continue;
+      merged.set(key, Object.assign({}, g, {window: which}));
+    }
+  }
+  return merged;
+}
+
+// Distinct display names of every city reporting in any window.
+async function citiesWithData() {
+  const names = new Set();
+  for (const which of ["5min", "1h", "24h"]) {
+    let map;
+    try { map = await getGrouped(which); }
+    catch (e) { if (e && e.kind === "cors") throw e; continue; }
+    for (const g of map.values()) if (g.pm25 != null || g.pm10 != null) names.add(g.display);
+  }
+  return [...names].sort();
 }
 
 /* ---------- NLU ---------- */
@@ -517,32 +534,44 @@ const EXPLAINERS = {
 
 let lastCity = null;
 
-const noData = city =>
-  `I couldn't find recent readings for ${city}. Its sensors may be offline, or it may not be in the network yet. ` +
-  'Send "list cities" to see where data is coming in right now.';
+// Windows, freshest first. `basis` is the phrase shown to the user so they
+// always know which time window an answer came from.
+const WINDOWS = [
+  {which: "5min", basis: "5-minute average"},
+  {which: "1h",   basis: "hourly average — no readings in the last 5 minutes"},
+  {which: "24h",  basis: "average over the last 24 hours — no readings in the last hour"}
+];
+const WHUMAN = {"5min": "5-minute", "1h": "hourly", "24h": "24-hour"};
+const WTAG   = {"5min": "", "1h": " (hourly)", "24h": " (24h)"};
 
-// A city's current snapshot, read from the single grouped dataset.
-async function citySnapshot(cityInput) {
-  const {map, basis} = await getSource("current");
-  const g = map.get(cityKey(cityInput));
-  if (!g || (g.pm25 == null && g.pm10 == null)) return null;
-  return {
-    s: {city: g.display, country: g.country, sensors: g.sensors,
-        pm25: g.pm25, pm10: g.pm10, pm25min: g.pm25min, pm25max: g.pm25max, basis},
-    a: aqiFrom(g.pm25, g.pm10)
-  };
+function noData(city, inNetwork) {
+  const why = inNetwork
+    ? "Its sensors appear to be offline — no readings in the last 5 minutes, hour, or 24 hours."
+    : "Its sensors may be offline, or it may not be in the network yet.";
+  return `I couldn't find recent readings for ${city}. ${why} ` +
+    'Send "list cities" to see where data is coming in right now.';
 }
 
-// A city's 24-hour mean PM2.5 (for trend context). Null if unavailable.
-async function cityDayAverage(cityInput) {
-  try {
-    const {map} = await getSource("24h");
-    const g = map.get(cityKey(cityInput));
-    return g ? g.pm25 : null;
-  } catch (e) {
-    if (e && e.kind === "cors") throw e;  // let the UI report a CORS block
-    return null;
+// A city's snapshot, cascading freshest-first across the three windows. Only
+// fetches a coarser window when the finer one lacks the city. A window whose
+// file errors is skipped; a CORS failure is re-thrown for the UI to report.
+async function citySnapshot(cityInput) {
+  const key = cityKey(cityInput);
+  for (const w of WINDOWS) {
+    let map;
+    try { map = await getGrouped(w.which); }
+    catch (e) { if (e && e.kind === "cors") throw e; continue; }
+    const g = map.get(key);
+    if (g && (g.pm25 != null || g.pm10 != null)) {
+      return {
+        s: {city: g.display, country: g.country, sensors: g.sensors,
+            pm25: g.pm25, pm10: g.pm10, pm25min: g.pm25min, pm25max: g.pm25max,
+            window: w.which, basis: w.basis},
+        a: aqiFrom(g.pm25, g.pm10)
+      };
+    }
   }
+  return null;
 }
 
 async function answer(message) {
@@ -560,9 +589,7 @@ async function answer(message) {
     case "explain": return EXPLAINERS[intent.topic] || HELP_TEXT;
 
     case "list_cities": {
-      const {map} = await getSource("current");
-      const live = [...map.values()].filter(g => g.pm25 != null || g.pm10 != null)
-        .map(g => g.display).sort();
+      const live = await citiesWithData();
       if (live.length)
         return `Cities reporting data right now: ${live.slice(0, 25).join(", ")}${live.length > 25 ? ", …" : ""}.\nAsk me about any of them, e.g. "air in ${live[0]}".`;
       return "I couldn't load live readings just now. Cities in the network include: " + CITY_NAMES.slice(0, 25).join(", ") + ".";
@@ -570,7 +597,7 @@ async function answer(message) {
 
     case "air_quality": {
       const snap = await citySnapshot(intent.city);
-      if (!snap) return noData(intent.city);
+      if (!snap) return noData(intent.city, cityInNetwork(intent.city));
       const {s, a} = snap;
       const lines = [`📍 ${s.city}`];
       if (a) lines.push(`${a.emoji} AQI ${a.aqi} — ${a.name}`);
@@ -587,36 +614,43 @@ async function answer(message) {
     case "health": {
       if (!intent.city) return 'Which city are you asking about? For example: "is it safe to run in Nairobi?"';
       const snap = await citySnapshot(intent.city);
-      if (!snap || !snap.a) return noData(intent.city);
+      if (!snap || !snap.a) return noData(intent.city, cityInNetwork(intent.city));
       const {s, a} = snap;
-      return `📍 ${s.city}: ${a.emoji} AQI ${a.aqi} — ${a.name} (PM2.5 ${s.pm25} µg/m³)\n💡 ${ADVICE[intent.audience][a.index]}`;
+      return `📍 ${s.city}: ${a.emoji} AQI ${a.aqi} — ${a.name} (PM2.5 ${s.pm25} µg/m³)\n💡 ${ADVICE[intent.audience][a.index]}\n(${s.basis})`;
     }
 
     case "trend": {
       if (!intent.city) return 'Which city are you asking about? For example: "is the air in Nairobi improving?"';
       const snap = await citySnapshot(intent.city);
-      if (!snap || snap.s.pm25 == null) return noData(intent.city);
+      if (!snap || snap.s.pm25 == null) return noData(intent.city, cityInNetwork(intent.city));
       const cur = snap.s.pm25;
-      const day = await cityDayAverage(intent.city);
+      if (snap.s.window === "24h")
+        return `The freshest data I have for ${intent.city} is the 24-hour average (PM2.5 ${cur} µg/m³) — there are no readings in the last hour, so I can't compare a shorter-term trend yet.`;
+      let dayMap;
+      try { dayMap = await getGrouped("24h"); }
+      catch (e) { if (e && e.kind === "cors") throw e; dayMap = null; }
+      const dayG = dayMap && dayMap.get(cityKey(intent.city));
+      const day = dayG ? dayG.pm25 : null;
       if (day == null)
-        return `${intent.city} is at PM2.5 ${cur} µg/m³ right now, but I don't have enough 24-hour data to compare a trend yet.`;
+        return `${intent.city} is at PM2.5 ${cur} µg/m³ (${snap.s.basis}), but I don't have enough 24-hour data to compare a trend yet.`;
       const pct = day ? Math.round((cur - day) / day * 100) : 0;
       let verdict;
       if (Math.abs(pct) < 10) verdict = `➡️ in line with today's 24-hour average (${day} µg/m³)`;
       else if (cur > day) verdict = `📈 above today's 24-hour average of ${day} µg/m³ — worse than usual right now`;
       else verdict = `📉 below today's 24-hour average of ${day} µg/m³ — better than usual right now`;
-      return `PM2.5 in ${intent.city} is ${cur} µg/m³, ${verdict} (${pct > 0 ? "+" : ""}${pct}%). This compares the latest network average against the last 24 hours, not a long-term climate trend.`;
+      const curLabel = snap.s.window === "5min" ? "latest" : "latest hourly";
+      return `PM2.5 in ${intent.city} is ${cur} µg/m³ (${snap.s.basis}), ${verdict} (${pct > 0 ? "+" : ""}${pct}%). This compares the ${curLabel} network average against the last 24 hours, not a long-term climate trend.`;
     }
 
     case "compare": {
       if (!intent.city || !intent.second)
         return 'Tell me two cities to compare, e.g. "compare Nairobi and Lagos".';
       const [sa, sb] = await Promise.all([citySnapshot(intent.city), citySnapshot(intent.second)]);
-      if (!sa) return noData(intent.city);
-      if (!sb) return noData(intent.second);
+      if (!sa) return noData(intent.city, cityInNetwork(intent.city));
+      if (!sb) return noData(intent.second, cityInNetwork(intent.second));
       const lines = ["⚖️ Air quality comparison (mean PM2.5):"];
       for (const {s, a} of [sa, sb])
-        lines.push(`${a ? a.emoji : "•"} ${s.city}: ${s.pm25} µg/m³ (${a ? "AQI " + a.aqi : "AQI n/a"})`);
+        lines.push(`${a ? a.emoji : "•"} ${s.city}: ${s.pm25} µg/m³ (${a ? "AQI " + a.aqi : "AQI n/a"})${WTAG[s.window]}`);
       if (sa.s.pm25 != null && sb.s.pm25 != null) {
         if (Math.abs(sa.s.pm25 - sb.s.pm25) < 2) lines.push("Both cities currently have similar air.");
         else {
@@ -625,23 +659,30 @@ async function answer(message) {
           lines.push(`${clean.city} currently has cleaner air` + (ratio ? ` — about ${ratio}× lower PM2.5.` : "."));
         }
       }
+      if (sa.s.window !== sb.s.window)
+        lines.push(`Note: ${sa.s.city}'s figure is the ${WHUMAN[sa.s.window]} average and ${sb.s.city}'s is the ${WHUMAN[sb.s.window]} average, so they cover different time windows.`);
       return lines.join("\n");
     }
 
     case "rank": {
-      const {map} = await getSource("current");
-      const ranked = rankFromMap(map);
+      const merged = await combinedCityMap();
+      const ranked = [...merged.values()].filter(g => g.pm25 != null)
+        .map(g => ({display: g.display, pm25: g.pm25, window: g.window}))
+        .sort((a, b) => b.pm25 - a.pm25);
       if (!ranked.length)
         return "I couldn't rank cities right now — the live feed didn't return usable city data. Try asking about a specific city instead.";
       const top = intent.order === "worst" ? ranked.slice(0, 5) : ranked.slice(-5).reverse();
       const lines = [intent.order === "worst"
         ? "😷 Most polluted cities right now (mean PM2.5):"
         : "🌿 Cleanest cities right now (mean PM2.5):"];
-      top.forEach(([city, value], i) => {
-        const a = aqiFrom(value, null);
-        lines.push(`${i + 1}. ${a ? a.emoji : "•"} ${city}: ${value} µg/m³`);
+      top.forEach((r, i) => {
+        const a = aqiFrom(r.pm25, null);
+        lines.push(`${i + 1}. ${a ? a.emoji : "•"} ${r.display}: ${r.pm25} µg/m³${WTAG[r.window]}`);
       });
-      lines.push("Based on the latest averages from the sensors.africa network.");
+      const mixed = new Set(top.map(r => r.window)).size > 1;
+      lines.push(mixed
+        ? "Each city uses its freshest available window (5-min, hourly, or 24-hour), so some rows cover different time windows."
+        : "Based on the latest averages from the sensors.africa network.");
       return lines.join("\n");
     }
 
