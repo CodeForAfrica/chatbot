@@ -124,20 +124,30 @@
 /* ============================================================
    sensors.africa chatbot — fully client-side edition.
    Everything (intent parsing, statistics, AQI, health advice)
-   runs in the browser; data is fetched straight from
-   api.sensors.africa. Host this file anywhere static
-   (GitHub Pages works) and you have a working chatbot.
+   runs in the browser. Data comes from the PUBLIC, no-auth
+   static aggregate files (data.dust.min.json / data.1h.json /
+   data.24h.json) plus the public /v2/cities/ list — never the
+   authenticated /v2/data/ endpoint. Host this file anywhere
+   static (GitHub Pages works) and you have a working chatbot.
    URL params: ?q=<question> auto-asks on load;
-               ?api=<base-url> overrides the API (for testing).
+               ?api=<base-url> overrides the API base (for testing).
    ============================================================ */
 
 const PARAMS = new URLSearchParams(location.search);
 const API_BASE = PARAMS.get("api") || "https://api.sensors.africa";
-const DATA_URL = API_BASE + "/v2/data/";
-const MAX_PAGES = 3;
+// Public, no-auth static aggregates. The /v2/data/ endpoint is deliberately
+// NOT used: it ignores ?city= (its filter is location__city) and requires
+// authentication in production (403). These pre-averaged files don't.
+const DUST_URL   = API_BASE + "/static/v2/data.dust.min.json"; // 5-min PM averages (primary)
+const HOUR_URL   = API_BASE + "/static/v2/data.1h.json";        // 1-hour averages (fallback)
+const DAY_URL    = API_BASE + "/static/v2/data.24h.json";       // 24-hour averages (trend context)
+const CITIES_URL = API_BASE + "/v2/cities/";                    // public, paginated
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
-const KNOWN_CITIES = [
+// Seed list so fuzzy city matching still works if /v2/cities/ is unreachable.
+// At load time ensureCitiesLoaded() replaces CITY_NAMES with the live list and
+// builds CITY_LOOKUP (alias -> canonical display label, e.g. "kano" -> "Kano").
+const SEED_CITIES = [
   "Nairobi","Lagos","Dar es Salaam","Accra","Kampala","Addis Ababa",
   "Johannesburg","Cape Town","Durban","Pretoria","Abuja","Port Harcourt",
   "Mombasa","Kisumu","Nakuru","Dodoma","Arusha","Mwanza","Bamako",
@@ -146,8 +156,10 @@ const KNOWN_CITIES = [
   "Harare","Gaborone","Windhoek","Maputo","Antananarivo","Port Louis",
   "Cairo","Alexandria","Tunis","Algiers","Casablanca","Monrovia",
   "Freetown","Banjul","Niamey","N'Djamena","Juba","Khartoum","Asmara",
-  "Djibouti","Mogadishu","Lilongwe","Blantyre","Beira","Stone Town"
+  "Djibouti","Mogadishu","Lilongwe","Blantyre","Beira","Stone Town","Kano"
 ];
+let CITY_NAMES = SEED_CITIES.slice();  // names/labels used for extraction + fuzzy matching
+let CITY_LOOKUP = new Map();           // strip(alias) -> canonical display label
 
 /* ---------- AQI (US EPA breakpoints; 2024 PM2.5 revision) ---------- */
 
@@ -228,7 +240,11 @@ function whoLine(pm25, pm10) {
   return parts.length ? parts.join("; ") + "." : "";
 }
 
-/* ---------- data client (fetch + parse + cache) ---------- */
+/* ---------- data layer (static aggregates → per-city averages) ----------
+   One fetch of a static file answers every city: we group all sensor
+   records by location.city and average PM2.5 (P2) and PM10 (P1) per city,
+   weighted by each reading's "samples". Rankings, comparisons and snapshots
+   all read from that single grouped dataset. */
 
 const cache = new Map();
 function cacheGet(key) {
@@ -237,107 +253,146 @@ function cacheGet(key) {
   return null;
 }
 
-function toNum(v) {
-  const f = parseFloat(v);
-  if (!isFinite(f) || f < 0 || f > 5000) return null;   // sentinel/garbage filter
+const rnd1 = x => Math.round(x * 10) / 10;
+const titleCase = s => String(s || "").replace(/\b\w/g, c => c.toUpperCase());
+
+// Discard garbage: non-numeric, negative, or absurd (PM2.5 capped at 1000).
+function num(v, cap) {
+  const f = typeof v === "number" ? v : parseFloat(v);
+  if (!isFinite(f) || f < 0 || f > cap) return null;
   return f;
 }
 
+// fetch that fails loudly and distinguishably: a CORS/network rejection is
+// tagged kind:"cors" so the UI can name it; an HTTP status → kind:"http".
+async function fetchJson(url) {
+  let res;
+  try {
+    res = await fetch(url, {headers: {Accept: "application/json"}});
+  } catch (e) {
+    const err = new Error("CORS or network failure"); err.kind = "cors"; err.url = url; throw err;
+  }
+  if (!res.ok) { const err = new Error("HTTP " + res.status); err.kind = "http"; err.status = res.status; err.url = url; throw err; }
+  return res.json();
+}
+
+// One static record → {city, country, P2, P2s (samples), P1, P1s} or null.
 function parseRecord(rec) {
   if (!rec || typeof rec !== "object") return null;
   const loc = rec.location || {};
-  const values = {};
+  const city = String(loc.city || "").trim();
+  if (!city) return null;
+  let P2 = null, P2s = 0, P1 = null, P1s = 0;
   for (const d of rec.sensordatavalues || []) {
-    if (d && d.value_type != null) {
-      const v = toNum(d.value);
-      if (v != null) values[d.value_type] = v;
-    }
+    if (!d || d.value_type == null) continue;
+    if (d.value_type === "P2") { const v = num(d.value, 1000); if (v != null) { P2 = v; P2s = Number(d.samples) || 0; } }
+    else if (d.value_type === "P1") { const v = num(d.value, 2000); if (v != null) { P1 = v; P1s = Number(d.samples) || 0; } }
   }
-  for (const k of ["P0","P1","P2"]) {
-    if (rec[k] != null && values[k] == null) {
-      const v = toNum(rec[k]);
-      if (v != null) values[k] = v;
-    }
-  }
-  if (!Object.keys(values).length) return null;
-  const ts = Date.parse(rec.timestamp || "");
-  return {
-    city: String(loc.city || rec.city || ""),
-    country: String(loc.country || rec.country || ""),
-    ts: isNaN(ts) ? null : ts,
-    lat: parseFloat(loc.latitude), lon: parseFloat(loc.longitude),
-    values
-  };
+  if (P2 == null && P1 == null) return null;
+  return { city, country: String(loc.country || "").trim(), P2, P2s, P1, P1s };
 }
 
-async function fetchReadings(city) {
-  const key = "r:" + (city || "").toLowerCase();
-  const hit = cacheGet(key);
+// Group records by canonical city → sample-weighted P2/P1 means + range.
+function groupByCity(records) {
+  const acc = new Map();
+  for (const rec of records || []) {
+    const p = parseRecord(rec);
+    if (!p) continue;
+    const rawKey = strip(p.city);
+    if (!rawKey) continue;
+    const display = CITY_LOOKUP.get(rawKey) || titleCase(p.city);
+    const key = strip(display);
+    let g = acc.get(key);
+    if (!g) { g = {display, country: "", key, p2sum: 0, p2w: 0, p1sum: 0, p1w: 0, p2vals: [], sensors: 0}; acc.set(key, g); }
+    g.sensors++;
+    if (!g.country && p.country) g.country = p.country;
+    if (p.P2 != null) { const w = p.P2s || 1; g.p2sum += p.P2 * w; g.p2w += w; g.p2vals.push(p.P2); }
+    if (p.P1 != null) { const w = p.P1s || 1; g.p1sum += p.P1 * w; g.p1w += w; }
+  }
+  const out = new Map();
+  for (const [key, g] of acc) {
+    out.set(key, {
+      display: g.display, country: g.country, key, sensors: g.sensors,
+      pm25: g.p2w ? rnd1(g.p2sum / g.p2w) : null,
+      pm10: g.p1w ? rnd1(g.p1sum / g.p1w) : null,
+      pm25min: g.p2vals.length ? rnd1(Math.min(...g.p2vals)) : null,
+      pm25max: g.p2vals.length ? rnd1(Math.max(...g.p2vals)) : null
+    });
+  }
+  return out;
+}
+
+// Load the public /v2/cities/ list once (paginated) to replace the seed list
+// and build the alias→label lookup. Best-effort: on failure we keep the seed.
+let citiesLoaded = false;
+async function ensureCitiesLoaded() {
+  if (citiesLoaded) return;
+  citiesLoaded = true;  // set first so a failure doesn't refetch on every message
+  try {
+    const names = new Set(SEED_CITIES);
+    const lookup = new Map();
+    let url = CITIES_URL, guard = 0;
+    while (url && guard++ < 15) {
+      const payload = await fetchJson(url);
+      const items = Array.isArray(payload) ? payload : (payload.results || []);
+      for (const it of items) {
+        if (!it) continue;
+        const name = (it.name || "").trim(), slug = (it.slug || "").trim(), label = (it.label || "").trim();
+        const display = label || name || slug;
+        if (!display) continue;
+        names.add(display);
+        for (const alias of [name, slug, label, display]) if (alias) lookup.set(strip(alias), display);
+      }
+      url = Array.isArray(payload) ? null : (payload.next || null);
+    }
+    CITY_NAMES = [...names];
+    CITY_LOOKUP = lookup;
+  } catch (e) {
+    // /v2/cities/ unreachable or CORS-blocked — seed list keeps matching working.
+  }
+}
+
+// Grouped current data: 5-minute dust file, falling back to the 1-hour file
+// if it's empty or errors (a CORS failure is re-thrown, since the same-origin
+// fallback would fail identically and the UI should report it). Returns
+// {map, basis}. Cached per CACHE_TTL_MS.
+async function getSource(which) {
+  const ck = "src:" + which;
+  const hit = cacheGet(ck);
   if (hit) return hit;
-  const readings = [];
-  let url = DATA_URL + "?" + new URLSearchParams({city: city || "", country: "", type: ""});
-  for (let page = 0; page < MAX_PAGES && url; page++) {
-    const res = await fetch(url, {headers: {Accept: "application/json"}});
-    if (!res.ok) throw new Error("API returned " + res.status);
-    const payload = await res.json();
-    const records = Array.isArray(payload) ? payload : (payload.results || []);
-    url = Array.isArray(payload) ? null : payload.next;
-    for (const rec of records) {
-      const r = parseRecord(rec);
-      if (r) readings.push(r);
+  await ensureCitiesLoaded();
+  let records, basis;
+  if (which === "24h") {
+    records = await fetchJson(DAY_URL);
+    basis = "24-hour network average";
+  } else {
+    try {
+      records = await fetchJson(DUST_URL);
+      basis = "5-minute network average";
+      if (!Array.isArray(records) || !records.length) throw new Error("empty");
+    } catch (e) {
+      if (e && e.kind === "cors") throw e;
+      records = await fetchJson(HOUR_URL);  // may throw → propagates to the UI
+      basis = "1-hour network average";
     }
   }
-  cache.set(key, {t: Date.now(), v: readings});
-  return readings;
+  const val = {map: groupByCity(Array.isArray(records) ? records : []), basis};
+  cache.set(ck, {t: Date.now(), v: val});
+  return val;
 }
 
-/* ---------- statistics ---------- */
-
-const mean = a => a.reduce((s, x) => s + x, 0) / a.length;
-const rnd1 = x => Math.round(x * 10) / 10;
-const vals = (rs, k) => rs.filter(r => k in r.values).map(r => r.values[k]);
-
-function summarize(readings, city) {
-  const pm25 = vals(readings, "P2"), pm10 = vals(readings, "P1");
-  const stamps = readings.filter(r => r.ts).map(r => r.ts);
-  const locs = new Set(readings.filter(r => isFinite(r.lat)).map(r => r.lat + "," + r.lon));
-  return {
-    city: city || (readings[0] && readings[0].city) || "",
-    n: readings.length,
-    sensors: locs.size || (readings.length ? 1 : 0),
-    pm25: pm25.length ? rnd1(mean(pm25)) : null,
-    pm25min: pm25.length ? rnd1(Math.min(...pm25)) : null,
-    pm25max: pm25.length ? rnd1(Math.max(...pm25)) : null,
-    pm10: pm10.length ? rnd1(mean(pm10)) : null,
-    latest: stamps.length ? new Date(Math.max(...stamps)) : null
-  };
+// Map a user's city string to a grouped-map key via the alias lookup.
+function cityKey(input) {
+  const s = strip(input);
+  const display = CITY_LOOKUP.get(s) || input;
+  return strip(display);
 }
 
-function trendOf(readings) {
-  const timed = readings.filter(r => r.ts && "P2" in r.values).sort((a, b) => a.ts - b.ts);
-  if (timed.length < 4) return null;
-  const mid = Math.floor(timed.length / 2);
-  const early = mean(timed.slice(0, mid).map(r => r.values.P2));
-  const late = mean(timed.slice(mid).map(r => r.values.P2));
-  if (!early) return null;
-  const change = (late - early) / early * 100;
-  return {
-    dir: Math.abs(change) < 10 ? "steady" : change > 0 ? "rising" : "falling",
-    change: Math.round(change), early: rnd1(early), late: rnd1(late), n: timed.length
-  };
-}
-
-function rankCities(readings) {
-  const byCity = {};
-  for (const r of readings) {
-    if (r.city && "P2" in r.values) {
-      const name = r.city.trim().replace(/\b\w/g, c => c.toUpperCase());
-      (byCity[name] = byCity[name] || []).push(r.values.P2);
-    }
-  }
-  return Object.entries(byCity)
-    .filter(([, v]) => v.length >= 3)
-    .map(([c, v]) => [c, rnd1(mean(v)), v.length])
+// Cities worst-first by mean PM2.5, from a single grouped map.
+function rankFromMap(map) {
+  return [...map.values()]
+    .filter(g => g.pm25 != null)
+    .map(g => [g.display, g.pm25, g.sensors])
     .sort((a, b) => b[1] - a[1]);
 }
 
@@ -362,14 +417,14 @@ function levenshtein(a, b) {
 function extractCities(msg) {
   const norm = strip(msg);
   const found = [];
-  for (const city of KNOWN_CITIES) {
+  for (const city of CITY_NAMES) {
     const idx = norm.indexOf(strip(city));
     if (idx >= 0) found.push([idx, city]);
   }
   if (!found.length) {
     const words = norm.match(/[a-z][a-z'-]{3,}/g) || [];
     for (let i = 0; i < words.length; i++) {
-      for (const city of KNOWN_CITIES) {
+      for (const city of CITY_NAMES) {
         if (city.includes(" ")) continue;
         const c = strip(city);
         const dist = levenshtein(words[i], c);
@@ -394,7 +449,7 @@ const RX = {
   compare: /\b(compare|versus|vs\.?|difference between|worse than|better than|cleaner than)\b/i,
   worst: /\b(worst|most polluted|dirtiest|highest pollution|highest pm)\b/i,
   best: /\b(best|cleanest|least polluted|lowest pollution|lowest pm)\b/i,
-  trend: /\b(trend|trending|improv|getting (better|worse)|chang(e|ing)|over time|history|past)\b/i,
+  trend: /\b(trend(s|ing)?|improv\w*|getting (better|worse)|chang(e|es|ing|ed)|over time|history|past|earlier|yesterday)\b/i,
   cities: /\b(which|what|list)\b.*\b(cities|city|places|locations)\b|\bcities\b\s*$/i,
   explain: /\b(what is|what's|whats|explain|meaning of|define)\b/i,
   air: /\b(air|aqi|pollution|pm\s?2\.?5|pm\s?10|dust|smog|quality|breathe|breathing)\b/i,
@@ -462,23 +517,36 @@ const EXPLAINERS = {
 
 let lastCity = null;
 
-function fmtFresh(s) {
-  if (!s.latest) return "";
-  const opts = {day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "UTC"};
-  return ` (latest reading ${s.latest.toLocaleString("en-GB", opts)} UTC)`;
-}
 const noData = city =>
-  `I couldn't find recent readings for ${city}. The sensors there may be offline. ` +
+  `I couldn't find recent readings for ${city}. Its sensors may be offline, or it may not be in the network yet. ` +
   'Send "list cities" to see where data is coming in right now.';
 
-async function snapshot(city) {
-  const readings = await fetchReadings(city);
-  if (!readings.length) return null;
-  const s = summarize(readings, city);
-  return {s, a: aqiFrom(s.pm25, s.pm10), readings};
+// A city's current snapshot, read from the single grouped dataset.
+async function citySnapshot(cityInput) {
+  const {map, basis} = await getSource("current");
+  const g = map.get(cityKey(cityInput));
+  if (!g || (g.pm25 == null && g.pm10 == null)) return null;
+  return {
+    s: {city: g.display, country: g.country, sensors: g.sensors,
+        pm25: g.pm25, pm10: g.pm10, pm25min: g.pm25min, pm25max: g.pm25max, basis},
+    a: aqiFrom(g.pm25, g.pm10)
+  };
+}
+
+// A city's 24-hour mean PM2.5 (for trend context). Null if unavailable.
+async function cityDayAverage(cityInput) {
+  try {
+    const {map} = await getSource("24h");
+    const g = map.get(cityKey(cityInput));
+    return g ? g.pm25 : null;
+  } catch (e) {
+    if (e && e.kind === "cors") throw e;  // let the UI report a CORS block
+    return null;
+  }
 }
 
 async function answer(message) {
+  await ensureCitiesLoaded();  // so extraction knows the live city list
   const intent = parseIntent(message, lastCity);
   if (intent.city) lastCity = intent.city;
 
@@ -492,31 +560,33 @@ async function answer(message) {
     case "explain": return EXPLAINERS[intent.topic] || HELP_TEXT;
 
     case "list_cities": {
-      const readings = await fetchReadings("");
-      const live = [...new Set(readings.filter(r => r.city.trim())
-        .map(r => r.city.trim().replace(/\b\w/g, c => c.toUpperCase())))].sort();
+      const {map} = await getSource("current");
+      const live = [...map.values()].filter(g => g.pm25 != null || g.pm10 != null)
+        .map(g => g.display).sort();
       if (live.length)
-        return `Cities reporting data right now: ${live.slice(0, 25).join(", ")}.\nAsk me about any of them, e.g. "air in ${live[0]}".`;
-      return "Cities in the sensors.africa network include: " + KNOWN_CITIES.slice(0, 25).join(", ") + ". Ask me about any of them.";
+        return `Cities reporting data right now: ${live.slice(0, 25).join(", ")}${live.length > 25 ? ", …" : ""}.\nAsk me about any of them, e.g. "air in ${live[0]}".`;
+      return "I couldn't load live readings just now. Cities in the network include: " + CITY_NAMES.slice(0, 25).join(", ") + ".";
     }
 
     case "air_quality": {
-      const snap = await snapshot(intent.city);
+      const snap = await citySnapshot(intent.city);
       if (!snap) return noData(intent.city);
       const {s, a} = snap;
-      const lines = [`📍 ${s.city}${fmtFresh(s)}`];
+      const lines = [`📍 ${s.city}`];
       if (a) lines.push(`${a.emoji} AQI ${a.aqi} — ${a.name}`);
-      if (s.pm25 != null) lines.push(`PM2.5: ${s.pm25} µg/m³ (range ${s.pm25min}–${s.pm25max} across ${s.sensors} sensor location(s))`);
+      if (s.pm25 != null) lines.push(`PM2.5: ${s.pm25} µg/m³` +
+        (s.sensors > 1 ? ` (range ${s.pm25min}–${s.pm25max} across ${s.sensors} sensors)` : ` (${s.sensors} sensor)`));
       if (s.pm10 != null) lines.push(`PM10: ${s.pm10} µg/m³`);
       const who = whoLine(s.pm25, s.pm10);
       if (who) lines.push(who);
       if (a) lines.push("💡 " + ADVICE[intent.audience || "general"][a.index]);
+      lines.push(`(${s.basis})`);
       return lines.join("\n");
     }
 
     case "health": {
       if (!intent.city) return 'Which city are you asking about? For example: "is it safe to run in Nairobi?"';
-      const snap = await snapshot(intent.city);
+      const snap = await citySnapshot(intent.city);
       if (!snap || !snap.a) return noData(intent.city);
       const {s, a} = snap;
       return `📍 ${s.city}: ${a.emoji} AQI ${a.aqi} — ${a.name} (PM2.5 ${s.pm25} µg/m³)\n💡 ${ADVICE[intent.audience][a.index]}`;
@@ -524,17 +594,24 @@ async function answer(message) {
 
     case "trend": {
       if (!intent.city) return 'Which city are you asking about? For example: "is the air in Nairobi improving?"';
-      const readings = await fetchReadings(intent.city);
-      const t = trendOf(readings);
-      if (!t) return `I don't have enough timestamped readings from ${intent.city} right now to compute a trend. Try asking for the current air quality instead.`;
-      const arrow = {rising: "📈 worsening", falling: "📉 improving", steady: "➡️ steady"}[t.dir];
-      return `PM2.5 in ${intent.city} is ${arrow} over the most recent readings: ${t.early} → ${t.late} µg/m³ (${t.change > 0 ? "+" : ""}${t.change}%, based on ${t.n} readings). Note this reflects the latest data window, not a long-term climate trend.`;
+      const snap = await citySnapshot(intent.city);
+      if (!snap || snap.s.pm25 == null) return noData(intent.city);
+      const cur = snap.s.pm25;
+      const day = await cityDayAverage(intent.city);
+      if (day == null)
+        return `${intent.city} is at PM2.5 ${cur} µg/m³ right now, but I don't have enough 24-hour data to compare a trend yet.`;
+      const pct = day ? Math.round((cur - day) / day * 100) : 0;
+      let verdict;
+      if (Math.abs(pct) < 10) verdict = `➡️ in line with today's 24-hour average (${day} µg/m³)`;
+      else if (cur > day) verdict = `📈 above today's 24-hour average of ${day} µg/m³ — worse than usual right now`;
+      else verdict = `📉 below today's 24-hour average of ${day} µg/m³ — better than usual right now`;
+      return `PM2.5 in ${intent.city} is ${cur} µg/m³, ${verdict} (${pct > 0 ? "+" : ""}${pct}%). This compares the latest network average against the last 24 hours, not a long-term climate trend.`;
     }
 
     case "compare": {
       if (!intent.city || !intent.second)
         return 'Tell me two cities to compare, e.g. "compare Nairobi and Lagos".';
-      const [sa, sb] = await Promise.all([snapshot(intent.city), snapshot(intent.second)]);
+      const [sa, sb] = await Promise.all([citySnapshot(intent.city), citySnapshot(intent.second)]);
       if (!sa) return noData(intent.city);
       if (!sb) return noData(intent.second);
       const lines = ["⚖️ Air quality comparison (mean PM2.5):"];
@@ -552,10 +629,10 @@ async function answer(message) {
     }
 
     case "rank": {
-      const readings = await fetchReadings("");
-      const ranked = rankCities(readings);
+      const {map} = await getSource("current");
+      const ranked = rankFromMap(map);
       if (!ranked.length)
-        return "I couldn't rank cities right now — the live feed didn't return enough city-tagged readings. Try asking about a specific city instead.";
+        return "I couldn't rank cities right now — the live feed didn't return usable city data. Try asking about a specific city instead.";
       const top = intent.order === "worst" ? ranked.slice(0, 5) : ranked.slice(-5).reverse();
       const lines = [intent.order === "worst"
         ? "😷 Most polluted cities right now (mean PM2.5):"
@@ -564,7 +641,7 @@ async function answer(message) {
         const a = aqiFrom(value, null);
         lines.push(`${i + 1}. ${a ? a.emoji : "•"} ${city}: ${value} µg/m³`);
       });
-      lines.push("Based on the latest readings from the sensors.africa network.");
+      lines.push("Based on the latest averages from the sensors.africa network.");
       return lines.join("\n");
     }
 
@@ -599,8 +676,17 @@ async function ask(message) {
     add(reply, "bot");
   } catch (err) {
     typing.remove();
-    add("I couldn't reach the sensors.africa data service (" + (err && err.message || "network error") +
-        "). Please check your connection and try again in a moment.", "bot");
+    if (err && err.kind === "cors") {
+      add("⚠️ The sensors.africa API blocked a cross-origin (CORS) request from this page, so I can't load live data in the browser. " +
+          "This is a CORS setting on api.sensors.africa, not a problem with your connection. " +
+          "(Technical detail: the request to " + (err.url || "the API") + " was rejected before any response.)", "bot");
+    } else if (err && err.kind === "http") {
+      add("The sensors.africa API returned an error (HTTP " + err.status + ") for " + (err.url || "the data endpoint") +
+          ". The service may be temporarily unavailable — please try again shortly.", "bot");
+    } else {
+      add("I couldn't reach the sensors.africa data service (" + (err && err.message || "network error") +
+          "). Please check your connection and try again in a moment.", "bot");
+    }
   } finally {
     send.disabled = false;
     box.focus();
