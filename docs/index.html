@@ -101,10 +101,11 @@
 <div id="chat" aria-live="polite"></div>
 
 <div id="chips">
-  <button class="chip">Air quality in Nairobi</button>
-  <button class="chip">Safe for kids to walk to school in Lagos?</button>
+  <!-- Always-safe chips render immediately. City-specific chips (a single-city
+       query, a kids/health query, and a comparison) are inserted before these
+       once live data arrives — see buildCityChips() — so tapping a suggestion
+       never lands on a city with no readings. -->
   <button class="chip">Most polluted city right now</button>
-  <button class="chip">Compare Nairobi and Kampala</button>
   <button class="chip">What is PM2.5?</button>
   <button class="chip">List cities</button>
 </div>
@@ -746,9 +747,40 @@ document.getElementById("chips").addEventListener("click", e => {
   if (e.target.classList.contains("chip")) ask(e.target.textContent);
 });
 
+// Build city-specific suggestion chips from cities that actually have data
+// (freshest window per city, highest-traffic first) and insert them before the
+// always-safe chips. Fire-and-forget so the UI never waits on the network; on
+// any fetch failure the safe chips are left as-is.
+async function buildCityChips() {
+  let merged;
+  try { merged = await combinedCityMap(); }
+  catch (e) { return; }  // CORS/network/etc. — keep only the safe chips
+  const cities = [...merged.values()]
+    .filter(g => g.pm25 != null || g.pm10 != null)
+    .sort((a, b) => (b.sensors - a.sensors) || a.display.localeCompare(b.display));
+  if (!cities.length) return;  // data loaded but no city has readings
+  const a = cities[0].display;
+  const b = cities.length > 1 ? cities[1].display : null;  // two highest-traffic
+  const texts = [
+    `Air quality in ${a}`,
+    `Is it safe for kids to walk to school in ${b || a}?`,
+  ];
+  if (b) texts.push(`Compare ${a} and ${b}`);
+  const container = document.getElementById("chips");
+  const anchor = container.firstElementChild;  // first always-safe chip
+  for (const text of texts) {
+    const btn = document.createElement("button");
+    btn.className = "chip";
+    btn.textContent = text;
+    container.insertBefore(btn, anchor);  // successive inserts keep source order
+  }
+}
+
 add('👋 Hello! I turn live air-quality data from sensors across African cities ' +
     'into plain answers — right here in your browser. Try a suggestion below, or ' +
     'ask me anything — like "Is it safe to run in Nairobi today?"', "bot");
+
+buildCityChips();  // async — swaps in city chips when data arrives, never blocks
 
 // Shareable questions: .../index.html?q=air+quality+in+nairobi
 const q = PARAMS.get("q");
