@@ -84,9 +84,86 @@
   button[type=submit]:disabled { opacity: .5; }
   footer.credit {
     text-align: center; font-size: .7rem; color: var(--muted);
-    padding: 0 12px 6px; background: var(--bg);
+    padding: 6px 12px 8px; background: var(--bg);
   }
   footer.credit a { color: var(--brand-2); }
+
+  /* ---- live summary panel (picker + card) ---- */
+  #panel { padding: 10px 12px 4px; background: var(--bg); }
+  #picker { display: flex; gap: 8px; margin-bottom: 10px; }
+  #picker select {
+    flex: 1; min-width: 0; padding: 9px 10px; border: 1px solid #cfc7b6;
+    border-radius: 12px; font-size: 15px; font-family: inherit;
+    background: #fff; color: var(--ink);
+  }
+  #refresh {
+    flex: none; width: 42px; border: 1px solid #cfc7b6; border-radius: 12px;
+    background: #fff; color: var(--brand-2); font-size: 1.15rem; cursor: pointer;
+  }
+  #refresh:active { background: var(--user); }
+  #refresh.spin { animation: spin .6s linear; }
+  @keyframes spin { from { transform: rotate(0); } to { transform: rotate(360deg); } }
+
+  .card {
+    border-radius: var(--radius); padding: 14px 16px 16px; color: var(--ink);
+    background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.1);
+    transition: background .25s ease;
+  }
+  .card.loading, .card.offline { background: #eceae3; color: var(--muted); }
+  .card-head {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 8px; margin-bottom: 8px;
+  }
+  .badge {
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    font-size: .62rem; font-weight: 700; letter-spacing: .08em;
+    text-transform: uppercase; padding: 3px 8px; border-radius: 999px;
+    background: rgba(0,0,0,.16);
+  }
+  .updated { font-size: .72rem; opacity: .8; }
+  .verdict { font-size: 1.5rem; font-weight: 700; line-height: 1.15; }
+  .advice { font-size: .9rem; margin-top: 4px; line-height: 1.4; }
+  .stats {
+    display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px;
+    margin-top: 12px;
+  }
+  .stat {
+    background: rgba(255,255,255,.35); border-radius: 12px; padding: 8px 10px;
+  }
+  .stat .v { display: block; font-size: 1.15rem; font-weight: 700; }
+  .stat .k {
+    display: block; font-size: .68rem; opacity: .85; margin-top: 1px;
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+  }
+  .gauge { margin-top: 14px; }
+  .gauge-track {
+    position: relative; height: 10px; border-radius: 999px;
+    background: linear-gradient(90deg,#4caf72 0%,#e6c94a 40%,#e8944a 65%,#d95757 100%);
+  }
+  .gauge-tick {
+    position: absolute; top: -3px; width: 2px; height: 16px;
+    background: var(--ink); opacity: .6; transform: translateX(-1px);
+  }
+  .gauge-marker {
+    position: absolute; top: 50%; width: 16px; height: 16px; border-radius: 50%;
+    background: #fff; border: 3px solid var(--ink);
+    transform: translate(-8px, -8px); box-shadow: 0 1px 3px rgba(0,0,0,.3);
+  }
+  .gauge-labels {
+    display: flex; justify-content: space-between; margin-top: 5px;
+    font-size: .62rem; opacity: .8;
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+  }
+  /* AQI band backgrounds + text colour (matches CATEGORIES order 0..5) */
+  .card.band-0 { background: #b7e2c4; }
+  .card.band-1 { background: #f2e2a3; }
+  .card.band-2 { background: #f3c79a; }
+  .card.band-3 { background: #d95757; color: #fff; }
+  .card.band-4 { background: #9b5bb0; color: #fff; }
+  .card.band-5 { background: #8a5a44; color: #fff; }
+  .card.band-3 .badge, .card.band-4 .badge, .card.band-5 .badge { background: rgba(255,255,255,.25); }
+  .card.band-3 .gauge-tick, .card.band-4 .gauge-tick, .card.band-5 .gauge-tick { background: #fff; }
+  .card.band-3 .gauge-marker, .card.band-4 .gauge-marker, .card.band-5 .gauge-marker { border-color: #fff; }
 </style>
 </head>
 <body>
@@ -97,6 +174,18 @@
     <p>ask the sensors anything — no app, no server</p>
   </div>
 </header>
+
+<section id="panel">
+  <div id="picker">
+    <select id="country" aria-label="Country"><option>Loading…</option></select>
+    <select id="city" aria-label="City"></select>
+    <button id="refresh" title="Refresh data" aria-label="Refresh data">⟳</button>
+  </div>
+  <div id="card" class="card loading">
+    <div class="verdict">Loading live air quality…</div>
+    <div class="advice">Fetching the latest readings from the sensors.africa network.</div>
+  </div>
+</section>
 
 <div id="chat" aria-live="polite"></div>
 
@@ -116,6 +205,7 @@
   <button type="submit" aria-label="Send">➤</button>
 </form>
 <footer class="credit">
+  Low-cost sensor readings are indicative, not regulatory-grade.
   Live data from <a href="https://sensors.africa" rel="noopener">sensors.africa</a>,
   a Code for Africa project · runs entirely in your browser
 </footer>
@@ -161,6 +251,25 @@ const SEED_CITIES = [
 ];
 let CITY_NAMES = SEED_CITIES.slice();  // names/labels used for extraction + fuzzy matching
 let CITY_LOOKUP = new Map();           // strip(alias) -> canonical display label
+let CITY_META = new Map();             // strip(display) -> {display, country, slug, lat, lon}
+let CITY_BY_SLUG = new Map();          // strip(slug) -> strip(display) key (for ?city= deep-link)
+
+// ISO-3166 alpha-2 → display name for countries in the network. Falls back to
+// the raw value if /v2/cities/ already returns a full name (no wrong data).
+const COUNTRY_NAMES = {
+  KE: "Kenya", NG: "Nigeria", UG: "Uganda", TZ: "Tanzania", GH: "Ghana",
+  ZA: "South Africa", ET: "Ethiopia", RW: "Rwanda", SN: "Senegal", CI: "Côte d'Ivoire",
+  CM: "Cameroon", CD: "DR Congo", ZM: "Zambia", ZW: "Zimbabwe", MW: "Malawi",
+  MZ: "Mozambique", BI: "Burundi", ML: "Mali", BF: "Burkina Faso", BJ: "Benin",
+  TG: "Togo", NE: "Niger", SL: "Sierra Leone", LR: "Liberia", SD: "Sudan",
+  EG: "Egypt", MA: "Morocco", TN: "Tunisia", DZ: "Algeria", NA: "Namibia",
+  BW: "Botswana", MG: "Madagascar", MU: "Mauritius", GM: "Gambia", TD: "Chad"
+};
+function countryLabel(c) {
+  const s = String(c || "").trim();
+  if (!s) return "Other";
+  return COUNTRY_NAMES[s.toUpperCase()] || s;
+}
 
 /* ---------- AQI (US EPA breakpoints; 2024 PM2.5 revision) ---------- */
 
@@ -264,6 +373,12 @@ function num(v, cap) {
   if (!isFinite(f) || f < 0 || f > cap) return null;
   return f;
 }
+// Range-bounded numeric parse for temperature/humidity (temp can be negative).
+function numRange(v, lo, hi) {
+  const f = typeof v === "number" ? v : parseFloat(v);
+  if (!isFinite(f) || f < lo || f > hi) return null;
+  return f;
+}
 
 // fetch that fails loudly and distinguishably: a CORS/network rejection is
 // tagged kind:"cors" so the UI can name it; an HTTP status → kind:"http".
@@ -278,23 +393,32 @@ async function fetchJson(url) {
   return res.json();
 }
 
-// One static record → {city, country, P2, P2s (samples), P1, P1s} or null.
+// One static record → {city, country, P2, P2s, P1, P1s, temp, hum, ts} or null.
+// Temperature/humidity come from DHT22 records (present in data.1h.json, absent
+// from the 5-min dust file); such a record has no P1/P2 but is still kept.
 function parseRecord(rec) {
   if (!rec || typeof rec !== "object") return null;
   const loc = rec.location || {};
   const city = String(loc.city || "").trim();
   if (!city) return null;
-  let P2 = null, P2s = 0, P1 = null, P1s = 0;
+  let P2 = null, P2s = 0, P1 = null, P1s = 0, temp = null, hum = null;
   for (const d of rec.sensordatavalues || []) {
     if (!d || d.value_type == null) continue;
-    if (d.value_type === "P2") { const v = num(d.value, 1000); if (v != null) { P2 = v; P2s = Number(d.samples) || 0; } }
-    else if (d.value_type === "P1") { const v = num(d.value, 2000); if (v != null) { P1 = v; P1s = Number(d.samples) || 0; } }
+    const t = d.value_type;
+    if (t === "P2") { const v = num(d.value, 1000); if (v != null) { P2 = v; P2s = Number(d.samples) || 0; } }
+    else if (t === "P1") { const v = num(d.value, 2000); if (v != null) { P1 = v; P1s = Number(d.samples) || 0; } }
+    else if (t === "temperature") { const v = numRange(d.value, -40, 60); if (v != null) temp = v; }
+    else if (t === "humidity") { const v = numRange(d.value, 0, 100); if (v != null) hum = v; }
   }
-  if (P2 == null && P1 == null) return null;
-  return { city, country: String(loc.country || "").trim(), P2, P2s, P1, P1s };
+  if (P2 == null && P1 == null && temp == null && hum == null) return null;
+  const ts = rec.timestamp ? Date.parse(rec.timestamp) : NaN;
+  return { city, country: String(loc.country || "").trim(), P2, P2s, P1, P1s, temp, hum, ts: isNaN(ts) ? null : ts };
 }
 
-// Group records by canonical city → sample-weighted P2/P1 means + range.
+// Group records by canonical city → sample-weighted P2/P1 means + range, plus
+// mean temperature/humidity and the newest record timestamp. `sensors` counts
+// only air-quality (P1/P2) records; temperature/humidity-only DHT22 records
+// contribute temp/hum and timestamp but not to the sensor tally.
 function groupByCity(records) {
   const acc = new Map();
   for (const rec of records || []) {
@@ -305,11 +429,15 @@ function groupByCity(records) {
     const display = CITY_LOOKUP.get(rawKey) || titleCase(p.city);
     const key = strip(display);
     let g = acc.get(key);
-    if (!g) { g = {display, country: "", key, p2sum: 0, p2w: 0, p1sum: 0, p1w: 0, p2vals: [], sensors: 0}; acc.set(key, g); }
-    g.sensors++;
+    if (!g) { g = {display, country: "", key, p2sum: 0, p2w: 0, p1sum: 0, p1w: 0,
+                   p2vals: [], sensors: 0, tsum: 0, tn: 0, hsum: 0, hn: 0, latest: null}; acc.set(key, g); }
+    if (p.P2 != null || p.P1 != null) g.sensors++;
     if (!g.country && p.country) g.country = p.country;
     if (p.P2 != null) { const w = p.P2s || 1; g.p2sum += p.P2 * w; g.p2w += w; g.p2vals.push(p.P2); }
     if (p.P1 != null) { const w = p.P1s || 1; g.p1sum += p.P1 * w; g.p1w += w; }
+    if (p.temp != null) { g.tsum += p.temp; g.tn++; }
+    if (p.hum != null) { g.hsum += p.hum; g.hn++; }
+    if (p.ts != null && (g.latest == null || p.ts > g.latest)) g.latest = p.ts;
   }
   const out = new Map();
   for (const [key, g] of acc) {
@@ -318,7 +446,11 @@ function groupByCity(records) {
       pm25: g.p2w ? rnd1(g.p2sum / g.p2w) : null,
       pm10: g.p1w ? rnd1(g.p1sum / g.p1w) : null,
       pm25min: g.p2vals.length ? rnd1(Math.min(...g.p2vals)) : null,
-      pm25max: g.p2vals.length ? rnd1(Math.max(...g.p2vals)) : null
+      pm25max: g.p2vals.length ? rnd1(Math.max(...g.p2vals)) : null,
+      pm25n: g.p2vals.length,
+      temp: g.tn ? rnd1(g.tsum / g.tn) : null,
+      humidity: g.hn ? Math.round(g.hsum / g.hn) : null,
+      latest: g.latest
     });
   }
   return out;
@@ -333,6 +465,8 @@ async function ensureCitiesLoaded() {
   try {
     const names = new Set(SEED_CITIES);
     const lookup = new Map();
+    const meta = new Map();
+    const bySlug = new Map();
     let url = CITIES_URL, guard = 0;
     while (url && guard++ < 15) {
       const payload = await fetchJson(url);
@@ -344,11 +478,17 @@ async function ensureCitiesLoaded() {
         if (!display) continue;
         names.add(display);
         for (const alias of [name, slug, label, display]) if (alias) lookup.set(strip(alias), display);
+        const dkey = strip(display);
+        meta.set(dkey, {display, country: (it.country || "").trim(), slug,
+                        lat: it.latitude, lon: it.longitude});
+        if (slug) bySlug.set(strip(slug), dkey);
       }
       url = Array.isArray(payload) ? null : (payload.next || null);
     }
     CITY_NAMES = [...names];
     CITY_LOOKUP = lookup;
+    CITY_META = meta;
+    CITY_BY_SLUG = bySlug;
   } catch (e) {
     // /v2/cities/ unreachable or CORS-blocked — seed list keeps matching working.
   }
@@ -567,7 +707,7 @@ async function citySnapshot(cityInput) {
       return {
         s: {city: g.display, country: g.country, sensors: g.sensors,
             pm25: g.pm25, pm10: g.pm10, pm25min: g.pm25min, pm25max: g.pm25max,
-            window: w.which, basis: w.basis},
+            pm25n: g.pm25n, latest: g.latest, window: w.which, basis: w.basis},
         a: aqiFrom(g.pm25, g.pm10)
       };
     }
@@ -781,6 +921,160 @@ add('👋 Hello! I turn live air-quality data from sensors across African cities
     'ask me anything — like "Is it safe to run in Nairobi today?"', "bot");
 
 buildCityChips();  // async — swaps in city chips when data arrives, never blocks
+
+/* ---------- live summary panel (picker + card) ---------- */
+
+const WINDOW_BADGE = {"5min": "LIVE · 5-MIN", "1h": "HOURLY AVERAGE", "24h": "24-HOUR AVERAGE"};
+const esc = s => String(s).replace(/[&<>"']/g,
+  c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+
+const countrySel = document.getElementById("country");
+const citySel = document.getElementById("city");
+const refreshBtn = document.getElementById("refresh");
+const cardEl = document.getElementById("card");
+
+let PANEL_CITIES = [];   // [{key, display, sensors, country, slug}] — cities with data
+let SELECTED_KEY = null;
+
+// Offline / no-data states — labelled clearly, never any sample numbers.
+function cardOffline(kind) {
+  cardEl.className = "card offline";
+  const detail = kind === "cors"
+    ? "The API blocked a cross-origin request from this page (a CORS setting on api.sensors.africa)."
+    : "Couldn't reach the sensors.africa data service.";
+  cardEl.innerHTML =
+    '<div class="verdict">Live data unavailable</div>' +
+    '<div class="advice">' + esc(detail) +
+    ' The chat below still works for explanations — try Refresh in a moment.</div>';
+}
+function cardNoData(display) {
+  cardEl.className = "card offline";
+  cardEl.innerHTML =
+    '<div class="verdict">No current readings</div>' +
+    '<div class="advice">No live data for ' + esc(display) + ' right now — its sensors may be offline.</div>';
+}
+
+// Render the summary card for one city from the per-city cascade.
+async function renderCard(display) {
+  cardEl.className = "card loading";
+  cardEl.innerHTML = '<div class="verdict">Loading ' + esc(display) + '…</div>';
+  let snap;
+  try { snap = await citySnapshot(display); }
+  catch (e) { return cardOffline(e && e.kind); }
+  if (!snap) return cardNoData(display);
+  const {s, a} = snap;
+
+  // Temperature/humidity always come from the 1-hour file (best-effort).
+  let temp = null, humidity = null;
+  try {
+    const g = (await getGrouped("1h")).get(cityKey(display));
+    if (g) { temp = g.temp; humidity = g.humidity; }
+  } catch (e) { /* omit temperature/humidity cleanly */ }
+
+  const idx = a ? a.index : 0;
+  const stats = [];
+  if (s.pm25 != null) {
+    stats.push([String(s.pm25), "PM2.5 µg/m³"]);
+    const ratio = s.pm25 / WHO_PM25;
+    stats.push(ratio >= 1 ? [ratio.toFixed(1) + "×", "WHO daily guideline"]
+                          : ["within", "WHO daily guideline"]);
+  }
+  if (s.pm10 != null) stats.push([String(s.pm10), "PM10 µg/m³"]);
+  const nSensors = (s.pm25 != null && s.pm25n) ? s.pm25n : s.sensors;
+  stats.push([String(nSensors), nSensors === 1 ? "sensor" : "sensors"]);
+  if (temp != null) stats.push([temp + "°C", "temperature"]);
+  if (humidity != null) stats.push([humidity + "%", "humidity"]);
+
+  const markerPct = s.pm25 != null ? Math.min(s.pm25, 60) / 60 * 100 : 0;
+  const updated = s.latest
+    ? "Updated " + new Date(s.latest).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", hour12: false})
+    : "";
+  const place = esc(s.city) + (s.country ? ", " + esc(countryLabel(s.country)) : "");
+
+  cardEl.className = "card band-" + idx;
+  cardEl.innerHTML =
+    '<div class="card-head">' +
+      '<span class="badge">' + esc(WINDOW_BADGE[s.window] || s.window) + '</span>' +
+      (updated ? '<span class="updated">' + esc(updated) + '</span>' : '') +
+    '</div>' +
+    '<div style="font-size:.82rem;opacity:.85;margin-bottom:2px">' + place + '</div>' +
+    '<div class="verdict">' + esc(a ? a.name : "Air quality") + '</div>' +
+    '<div class="advice">' + esc(a ? ADVICE.general[idx] : "") + '</div>' +
+    '<div class="stats">' +
+      stats.map(([v, k]) => '<div class="stat"><span class="v">' + esc(v) +
+        '</span><span class="k">' + esc(k) + '</span></div>').join("") +
+    '</div>' +
+    (s.pm25 != null
+      ? '<div class="gauge"><div class="gauge-track">' +
+          '<div class="gauge-tick" style="left:25%"></div>' +
+          '<div class="gauge-marker" style="left:' + markerPct.toFixed(1) + '%"></div>' +
+        '</div><div class="gauge-labels"><span>0</span><span>WHO 15</span><span>60+ µg/m³</span></div></div>'
+      : "");
+}
+
+function populateCountries() {
+  const countries = [...new Set(PANEL_CITIES.map(c => c.country))].sort((a, b) => a.localeCompare(b));
+  countrySel.innerHTML = countries.map(c => '<option value="' + esc(c) + '">' + esc(c) + '</option>').join("");
+}
+function populateCities(country) {
+  const list = PANEL_CITIES.filter(c => c.country === country).sort((a, b) => a.display.localeCompare(b.display));
+  citySel.innerHTML = list.map(c => '<option value="' + esc(c.key) + '">' + esc(c.display) + '</option>').join("");
+  return list.length ? list[0].key : null;
+}
+function selectCity(key) {
+  const entry = PANEL_CITIES.find(c => c.key === key);
+  if (!entry) return;
+  SELECTED_KEY = key;
+  if (countrySel.value !== entry.country) { countrySel.value = entry.country; populateCities(entry.country); }
+  citySel.value = key;
+  lastCity = entry.display;   // chat context follows the picker
+  renderCard(entry.display);
+}
+
+// Build the picker from cities that actually have data; default to the city
+// with the most sensors, or the ?city=<slug> deep-link if it resolves.
+async function initPanel(preselectSlug) {
+  cardEl.className = "card loading";
+  let merged;
+  try { merged = await combinedCityMap(); }
+  catch (e) { return cardOffline(e && e.kind); }
+  const cities = [...merged.values()].filter(g => g.pm25 != null || g.pm10 != null);
+  if (!cities.length) { countrySel.innerHTML = ""; citySel.innerHTML = ""; return cardNoData("any city"); }
+  PANEL_CITIES = cities.map(g => {
+    const m = CITY_META.get(g.key) || {};
+    return {
+      key: g.key, display: g.display, sensors: g.sensors,
+      country: countryLabel(m.country || g.country || ""),
+      slug: strip((m.slug || "") || g.key)
+    };
+  });
+  populateCountries();
+  let target = null;
+  if (preselectSlug) {
+    const skey = CITY_BY_SLUG.get(strip(preselectSlug));
+    target = PANEL_CITIES.find(c => c.key === skey) || PANEL_CITIES.find(c => c.slug === strip(preselectSlug));
+  }
+  if (!target) target = PANEL_CITIES.slice()
+    .sort((a, b) => (b.sensors - a.sensors) || a.display.localeCompare(b.display))[0];
+  countrySel.value = target.country;
+  populateCities(target.country);
+  selectCity(target.key);
+}
+
+countrySel.addEventListener("change", () => {
+  const firstKey = populateCities(countrySel.value);
+  if (firstKey) selectCity(firstKey);
+});
+citySel.addEventListener("change", () => selectCity(citySel.value));
+refreshBtn.addEventListener("click", () => {
+  refreshBtn.classList.remove("spin"); void refreshBtn.offsetWidth; refreshBtn.classList.add("spin");
+  const entry = PANEL_CITIES.find(c => c.key === SELECTED_KEY);
+  if (entry) renderCard(entry.display);   // re-reads through the 5-minute cache
+  else initPanel();
+});
+
+// Preselect ?city=<slug> if present; otherwise the highest-traffic city.
+initPanel(PARAMS.get("city"));  // async — never blocks the chat
 
 // Shareable questions: .../index.html?q=air+quality+in+nairobi
 const q = PARAMS.get("q");
