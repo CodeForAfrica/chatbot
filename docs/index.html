@@ -41,7 +41,7 @@
   header h1 { font-size: 1.05rem; font-weight: 600; letter-spacing: .2px; }
   header p { font-size: .78rem; opacity: .85; font-style: italic; }
   #chat {
-    flex: 1; overflow-y: auto; padding: 16px 12px 8px;
+    flex: 1; min-height: 0; overflow-y: auto; padding: 16px 12px 8px;
     display: flex; flex-direction: column; gap: 10px;
     -webkit-overflow-scrolling: touch;
   }
@@ -164,6 +164,35 @@
   .card.band-3 .badge, .card.band-4 .badge, .card.band-5 .badge { background: rgba(255,255,255,.25); }
   .card.band-3 .gauge-tick, .card.band-4 .gauge-tick, .card.band-5 .gauge-tick { background: #fff; }
   .card.band-3 .gauge-marker, .card.band-4 .gauge-marker, .card.band-5 .gauge-marker { border-color: #fff; }
+
+  /* stale-reading warning on the Updated line */
+  .updated.stale { font-weight: 700; color: #8a2b2b; }
+  .card.band-3 .updated.stale, .card.band-4 .updated.stale, .card.band-5 .updated.stale { color: #ffd7a8; }
+
+  /* collapsible card: the compact row is desktop-hidden; body shows in full */
+  .card-collapsed { display: none; }
+  .card-body { display: block; }
+  .card.ok .card-collapsed {
+    width: 100%; border: 0; background: transparent; color: inherit; cursor: pointer;
+    font-family: inherit; text-align: left; padding: 2px 0;
+    align-items: baseline; gap: 8px; flex-wrap: wrap;
+  }
+  .cc-verdict { font-size: 1.15rem; font-weight: 700; }
+  .cc-pm { font-size: 1.05rem; font-weight: 700; }
+  .cc-pm small { font-weight: 400; font-size: .7rem; opacity: .8; }
+  .cc-who { font-size: .8rem; opacity: .9; }
+  .card-collapsed .chevron { margin-left: auto; transition: transform .2s ease; }
+  .card.open .card-collapsed .chevron { transform: rotate(180deg); }
+
+  @media (max-width: 600px) {
+    .card { padding: 12px 14px 14px; }
+    .card.ok .card-collapsed { display: flex; }
+    .card.ok .card-body { display: none; max-height: 70vh; overflow-y: auto; }
+    .card.ok.open .card-body { display: block; margin-top: 10px; }
+    .card .verdict { font-size: 1.2rem; }
+    .stats { gap: 6px; margin-top: 10px; }
+    .stat { padding: 6px 8px; }
+  }
 </style>
 </head>
 <body>
@@ -192,7 +221,7 @@
 <div id="chips">
   <!-- Always-safe chips render immediately. City-specific chips (a single-city
        query, a kids/health query, and a comparison) are inserted before these
-       once live data arrives — see buildCityChips() — so tapping a suggestion
+       once live data arrives — see refreshChips() — so tapping a suggestion
        never lands on a city with no readings. -->
   <button class="chip">Most polluted city right now</button>
   <button class="chip">What is PM2.5?</button>
@@ -350,6 +379,41 @@ function whoLine(pm25, pm10) {
   return parts.length ? parts.join("; ") + "." : "";
 }
 
+/* ---------- timestamps (parse as UTC, render in local time) ---------- */
+
+// Parse an API timestamp to epoch ms, treating it as UTC when it carries no
+// offset (append "Z"). Returns null for missing/unparseable values so the UI
+// can omit the line rather than ever render "Invalid Date".
+function parseTs(v) {
+  if (v == null) return null;
+  let s = String(v).trim();
+  if (!s) return null;
+  s = s.replace(" ", "T");                       // "2026-07-27 14:03:00" → ISO shape
+  if (!/([zZ]|[+\-]\d{2}:?\d{2})$/.test(s)) s += "Z";
+  const ms = Date.parse(s);
+  return isNaN(ms) ? null : ms;
+}
+const STALE_HOURS = 6;
+function ageHours(ms) { return (Date.now() - ms) / 3600000; }
+function fmtDateTime(ms) {
+  const d = new Date(ms);   // local time
+  const time = d.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", hour12: false});
+  const mon = d.toLocaleDateString([], {month: "short"});
+  return time + ", " + d.getDate() + " " + mon;   // "D Mon" ordering, e.g. "14:20, 26 Jul"
+}
+// Card "Updated" text: {text, stale} or null when no timestamp.
+function fmtUpdated(ms) {
+  if (ms == null) return null;
+  const h = ageHours(ms), stale = h > STALE_HOURS;
+  return {text: "Updated " + fmtDateTime(ms) + (stale ? " — " + Math.round(h) + " h ago" : ""), stale};
+}
+// Chat trailing clause, e.g. " as of 14:20, 26 Jul (local time)"; "" when none.
+function asOf(ms) {
+  if (ms == null) return "";
+  const h = ageHours(ms), stale = h > STALE_HOURS;
+  return " as of " + fmtDateTime(ms) + (stale ? " — " + Math.round(h) + " h ago" : "") + " (local time)";
+}
+
 /* ---------- data layer (static aggregates → per-city averages) ----------
    Each static file (5-min dust, 1-hour, 24-hour) is grouped by location.city
    into sample-weighted PM2.5 (P2) / PM10 (P1) means. For a given city we
@@ -411,8 +475,7 @@ function parseRecord(rec) {
     else if (t === "humidity") { const v = numRange(d.value, 0, 100); if (v != null) hum = v; }
   }
   if (P2 == null && P1 == null && temp == null && hum == null) return null;
-  const ts = rec.timestamp ? Date.parse(rec.timestamp) : NaN;
-  return { city, country: String(loc.country || "").trim(), P2, P2s, P1, P1s, temp, hum, ts: isNaN(ts) ? null : ts };
+  return { city, country: String(loc.country || "").trim(), P2, P2s, P1, P1s, temp, hum, ts: parseTs(rec.timestamp) };
 }
 
 // Group records by canonical city → sample-weighted P2/P1 means + range, plus
@@ -748,7 +811,7 @@ async function answer(message) {
       const who = whoLine(s.pm25, s.pm10);
       if (who) lines.push(who);
       if (a) lines.push("💡 " + ADVICE[intent.audience || "general"][a.index]);
-      lines.push(`(${s.basis})`);
+      lines.push(`(${s.basis})${asOf(s.latest)}`);
       return lines.join("\n");
     }
 
@@ -757,7 +820,7 @@ async function answer(message) {
       const snap = await citySnapshot(intent.city);
       if (!snap || !snap.a) return noData(intent.city, cityInNetwork(intent.city));
       const {s, a} = snap;
-      return `📍 ${s.city}: ${a.emoji} AQI ${a.aqi} — ${a.name} (PM2.5 ${s.pm25} µg/m³)\n💡 ${ADVICE[intent.audience][a.index]}\n(${s.basis})`;
+      return `📍 ${s.city}: ${a.emoji} AQI ${a.aqi} — ${a.name} (PM2.5 ${s.pm25} µg/m³)\n💡 ${ADVICE[intent.audience][a.index]}\n(${s.basis})${asOf(s.latest)}`;
     }
 
     case "trend": {
@@ -766,21 +829,21 @@ async function answer(message) {
       if (!snap || snap.s.pm25 == null) return noData(intent.city, cityInNetwork(intent.city));
       const cur = snap.s.pm25;
       if (snap.s.window === "24h")
-        return `The freshest data I have for ${intent.city} is the 24-hour average (PM2.5 ${cur} µg/m³) — there are no readings in the last hour, so I can't compare a shorter-term trend yet.`;
+        return `The freshest data I have for ${intent.city} is the 24-hour average (PM2.5 ${cur} µg/m³) — there are no readings in the last hour, so I can't compare a shorter-term trend yet.${asOf(snap.s.latest)}`;
       let dayMap;
       try { dayMap = await getGrouped("24h"); }
       catch (e) { if (e && e.kind === "cors") throw e; dayMap = null; }
       const dayG = dayMap && dayMap.get(cityKey(intent.city));
       const day = dayG ? dayG.pm25 : null;
       if (day == null)
-        return `${intent.city} is at PM2.5 ${cur} µg/m³ (${snap.s.basis}), but I don't have enough 24-hour data to compare a trend yet.`;
+        return `${intent.city} is at PM2.5 ${cur} µg/m³ (${snap.s.basis}), but I don't have enough 24-hour data to compare a trend yet.${asOf(snap.s.latest)}`;
       const pct = day ? Math.round((cur - day) / day * 100) : 0;
       let verdict;
       if (Math.abs(pct) < 10) verdict = `➡️ in line with today's 24-hour average (${day} µg/m³)`;
       else if (cur > day) verdict = `📈 above today's 24-hour average of ${day} µg/m³ — worse than usual right now`;
       else verdict = `📉 below today's 24-hour average of ${day} µg/m³ — better than usual right now`;
       const curLabel = snap.s.window === "5min" ? "latest" : "latest hourly";
-      return `PM2.5 in ${intent.city} is ${cur} µg/m³ (${snap.s.basis}), ${verdict} (${pct > 0 ? "+" : ""}${pct}%). This compares the ${curLabel} network average against the last 24 hours, not a long-term climate trend.`;
+      return `PM2.5 in ${intent.city} is ${cur} µg/m³ (${snap.s.basis}), ${verdict} (${pct > 0 ? "+" : ""}${pct}%). This compares the ${curLabel} network average against the last 24 hours, not a long-term climate trend.${asOf(snap.s.latest)}`;
     }
 
     case "compare": {
@@ -802,13 +865,22 @@ async function answer(message) {
       }
       if (sa.s.window !== sb.s.window)
         lines.push(`Note: ${sa.s.city}'s figure is the ${WHUMAN[sa.s.window]} average and ${sb.s.city}'s is the ${WHUMAN[sb.s.window]} average, so they cover different time windows.`);
+      const la = sa.s.latest, lb = sb.s.latest;
+      if (la != null && lb != null && Math.abs(la - lb) > 3600000) {
+        lines.push(`${sa.s.city}${asOf(la)}`);
+        lines.push(`${sb.s.city}${asOf(lb)}`);
+      } else {
+        const newest = (la != null && lb != null) ? Math.max(la, lb) : (la != null ? la : lb);
+        const stamp = asOf(newest);
+        if (stamp) lines.push(stamp.replace(/^ /, ""));
+      }
       return lines.join("\n");
     }
 
     case "rank": {
       const merged = await combinedCityMap();
       const ranked = [...merged.values()].filter(g => g.pm25 != null)
-        .map(g => ({display: g.display, pm25: g.pm25, window: g.window}))
+        .map(g => ({display: g.display, pm25: g.pm25, window: g.window, latest: g.latest}))
         .sort((a, b) => b.pm25 - a.pm25);
       if (!ranked.length)
         return "I couldn't rank cities right now — the live feed didn't return usable city data. Try asking about a specific city instead.";
@@ -824,6 +896,8 @@ async function answer(message) {
       lines.push(mixed
         ? "Each city uses its freshest available window (5-min, hourly, or 24-hour), so some rows cover different time windows."
         : "Based on the latest averages from the sensors.africa network.");
+      const newest = top.map(r => r.latest).filter(x => x != null).sort((a, b) => b - a)[0];
+      if (newest != null) lines.push(`Latest of these readings${asOf(newest)}.`);
       return lines.join("\n");
     }
 
@@ -887,11 +961,12 @@ document.getElementById("chips").addEventListener("click", e => {
   if (e.target.classList.contains("chip")) ask(e.target.textContent);
 });
 
-// Build city-specific suggestion chips from cities that actually have data
-// (freshest window per city, highest-traffic first) and insert them before the
-// always-safe chips. Fire-and-forget so the UI never waits on the network; on
-// any fetch failure the safe chips are left as-is.
-async function buildCityChips() {
+// Build/refresh city-specific suggestion chips from cities that actually have
+// data (freshest window per city, highest-traffic first), inserted before the
+// always-safe chips. Re-runnable: only rebuilds when the chip set changed, so
+// auto-refresh causes no flicker. On any fetch failure the safe chips remain.
+let CHIPS_SIG = null;
+async function refreshChips() {
   let merged;
   try { merged = await combinedCityMap(); }
   catch (e) { return; }  // CORS/network/etc. — keep only the safe chips
@@ -906,11 +981,15 @@ async function buildCityChips() {
     `Is it safe for kids to walk to school in ${b || a}?`,
   ];
   if (b) texts.push(`Compare ${a} and ${b}`);
+  const sig = texts.join("|");
+  if (sig === CHIPS_SIG) return;   // unchanged → don't touch the DOM
+  CHIPS_SIG = sig;
   const container = document.getElementById("chips");
-  const anchor = container.firstElementChild;  // first always-safe chip
+  container.querySelectorAll(".chip-dyn").forEach(el => el.remove());  // drop previous dynamic chips
+  const anchor = container.querySelector(".chip:not(.chip-dyn)");      // first always-safe chip
   for (const text of texts) {
     const btn = document.createElement("button");
-    btn.className = "chip";
+    btn.className = "chip chip-dyn";
     btn.textContent = text;
     container.insertBefore(btn, anchor);  // successive inserts keep source order
   }
@@ -920,7 +999,7 @@ add('👋 Hello! I turn live air-quality data from sensors across African cities
     'into plain answers — right here in your browser. Try a suggestion below, or ' +
     'ask me anything — like "Is it safe to run in Nairobi today?"', "bot");
 
-buildCityChips();  // async — swaps in city chips when data arrives, never blocks
+refreshChips();  // async — swaps in city chips when data arrives, never blocks
 
 /* ---------- live summary panel (picker + card) ---------- */
 
@@ -936,90 +1015,142 @@ const cardEl = document.getElementById("card");
 let PANEL_CITIES = [];   // [{key, display, sensors, country, slug}] — cities with data
 let SELECTED_KEY = null;
 
-// Offline / no-data states — labelled clearly, never any sample numbers.
-function cardOffline(kind) {
-  cardEl.className = "card offline";
-  const detail = kind === "cors"
-    ? "The API blocked a cross-origin request from this page (a CORS setting on api.sensors.africa)."
-    : "Couldn't reach the sensors.africa data service.";
-  cardEl.innerHTML =
-    '<div class="verdict">Live data unavailable</div>' +
-    '<div class="advice">' + esc(detail) +
-    ' The chat below still works for explanations — try Refresh in a moment.</div>';
-}
-function cardNoData(display) {
-  cardEl.className = "card offline";
-  cardEl.innerHTML =
-    '<div class="verdict">No current readings</div>' +
-    '<div class="advice">No live data for ' + esc(display) + ' right now — its sensors may be offline.</div>';
-}
+// Session memory of the mobile card's open/closed state.
+let cardExpanded = (() => { try { return sessionStorage.getItem("cardExpanded") === "1"; } catch (e) { return false; } })();
+let LAST_CARD_SIG = null;
+let SELECTED_DISPLAY = null;
 
-// Render the summary card for one city from the per-city cascade.
-async function renderCard(display) {
-  cardEl.className = "card loading";
-  cardEl.innerHTML = '<div class="verdict">Loading ' + esc(display) + '…</div>';
+// Fetch everything the card needs; returns a plain model, never throws.
+async function loadCardModel(display) {
   let snap;
   try { snap = await citySnapshot(display); }
-  catch (e) { return cardOffline(e && e.kind); }
-  if (!snap) return cardNoData(display);
-  const {s, a} = snap;
-
-  // Temperature/humidity always come from the 1-hour file (best-effort).
-  let temp = null, humidity = null;
+  catch (e) { return {kind: "offline", cors: !!(e && e.kind === "cors")}; }
+  if (!snap) return {kind: "nodata", display};
+  let temp = null, humidity = null;   // temp/humidity always from the 1-hour file
   try {
     const g = (await getGrouped("1h")).get(cityKey(display));
     if (g) { temp = g.temp; humidity = g.humidity; }
   } catch (e) { /* omit temperature/humidity cleanly */ }
+  return {kind: "ok", s: snap.s, a: snap.a, temp, humidity};
+}
 
+// Signature of the displayed content — lets silent polls skip needless repaints.
+function cardSig(display, m) {
+  if (m.kind !== "ok") return display + "|" + m.kind + (m.cors ? ":cors" : "");
+  const s = m.s;
+  return ["ok", display, s.pm25, s.pm10, s.window, s.latest, s.sensors, s.pm25n, m.temp, m.humidity].join("|");
+}
+
+function paintCard(display, m) {
+  if (m.kind === "offline") {
+    cardEl.className = "card offline";
+    const detail = m.cors
+      ? "The API blocked a cross-origin request from this page (a CORS setting on api.sensors.africa)."
+      : "Couldn't reach the sensors.africa data service.";
+    cardEl.innerHTML = '<div class="card-body"><div class="verdict">Live data unavailable</div>' +
+      '<div class="advice">' + esc(detail) + ' The chat below still works for explanations — try Refresh in a moment.</div></div>';
+    return;
+  }
+  if (m.kind === "nodata") {
+    cardEl.className = "card offline";
+    cardEl.innerHTML = '<div class="card-body"><div class="verdict">No current readings</div>' +
+      '<div class="advice">No live data for ' + esc(m.display) + ' right now — its sensors may be offline.</div></div>';
+    return;
+  }
+  const {s, a, temp, humidity} = m;
   const idx = a ? a.index : 0;
+  const badge = esc(WINDOW_BADGE[s.window] || s.window);
+  const up = fmtUpdated(s.latest);   // reading timestamp, never the fetch time
+  const updatedHTML = up ? '<span class="updated' + (up.stale ? " stale" : "") + '">' + esc(up.text) + '</span>' : "";
+  const place = esc(s.city) + (s.country ? ", " + esc(countryLabel(s.country)) : "");
+
   const stats = [];
+  let whoShort = "";
   if (s.pm25 != null) {
     stats.push([String(s.pm25), "PM2.5 µg/m³"]);
     const ratio = s.pm25 / WHO_PM25;
-    stats.push(ratio >= 1 ? [ratio.toFixed(1) + "×", "WHO daily guideline"]
-                          : ["within", "WHO daily guideline"]);
+    if (ratio >= 1) { stats.push([ratio.toFixed(1) + "×", "WHO daily guideline"]); whoShort = ratio.toFixed(1) + "× WHO"; }
+    else { stats.push(["within", "WHO daily guideline"]); whoShort = "within WHO"; }
   }
   if (s.pm10 != null) stats.push([String(s.pm10), "PM10 µg/m³"]);
   const nSensors = (s.pm25 != null && s.pm25n) ? s.pm25n : s.sensors;
   stats.push([String(nSensors), nSensors === 1 ? "sensor" : "sensors"]);
   if (temp != null) stats.push([temp + "°C", "temperature"]);
   if (humidity != null) stats.push([humidity + "%", "humidity"]);
-
   const markerPct = s.pm25 != null ? Math.min(s.pm25, 60) / 60 * 100 : 0;
-  const updated = s.latest
-    ? "Updated " + new Date(s.latest).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", hour12: false})
-    : "";
-  const place = esc(s.city) + (s.country ? ", " + esc(countryLabel(s.country)) : "");
 
-  cardEl.className = "card band-" + idx;
-  cardEl.innerHTML =
-    '<div class="card-head">' +
-      '<span class="badge">' + esc(WINDOW_BADGE[s.window] || s.window) + '</span>' +
-      (updated ? '<span class="updated">' + esc(updated) + '</span>' : '') +
-    '</div>' +
+  const collapsed =
+    '<button class="card-collapsed" aria-expanded="' + (cardExpanded ? "true" : "false") + '">' +
+      '<span class="cc-verdict">' + esc(a ? a.name : "Air quality") + '</span>' +
+      (s.pm25 != null ? '<span class="cc-pm">' + esc(String(s.pm25)) + '<small> µg/m³</small></span>' : "") +
+      (whoShort ? '<span class="cc-who">' + esc(whoShort) + '</span>' : "") +
+      '<span class="badge cc-badge">' + badge + '</span>' +
+      '<span class="chevron">▾</span>' +
+    '</button>';
+
+  const body = '<div class="card-body">' +
+    '<div class="card-head"><span class="badge">' + badge + '</span>' + updatedHTML + '</div>' +
     '<div style="font-size:.82rem;opacity:.85;margin-bottom:2px">' + place + '</div>' +
     '<div class="verdict">' + esc(a ? a.name : "Air quality") + '</div>' +
     '<div class="advice">' + esc(a ? ADVICE.general[idx] : "") + '</div>' +
     '<div class="stats">' +
-      stats.map(([v, k]) => '<div class="stat"><span class="v">' + esc(v) +
-        '</span><span class="k">' + esc(k) + '</span></div>').join("") +
+      stats.map(([v, k]) => '<div class="stat"><span class="v">' + esc(v) + '</span><span class="k">' + esc(k) + '</span></div>').join("") +
     '</div>' +
     (s.pm25 != null
-      ? '<div class="gauge"><div class="gauge-track">' +
-          '<div class="gauge-tick" style="left:25%"></div>' +
-          '<div class="gauge-marker" style="left:' + markerPct.toFixed(1) + '%"></div>' +
-        '</div><div class="gauge-labels"><span>0</span><span>WHO 15</span><span>60+ µg/m³</span></div></div>'
-      : "");
+      ? '<div class="gauge"><div class="gauge-track"><div class="gauge-tick" style="left:25%"></div>' +
+        '<div class="gauge-marker" style="left:' + markerPct.toFixed(1) + '%"></div></div>' +
+        '<div class="gauge-labels"><span>0</span><span>WHO 15</span><span>60+ µg/m³</span></div></div>'
+      : "") +
+  '</div>';
+
+  cardEl.className = "card ok band-" + idx + (cardExpanded ? " open" : "");
+  cardEl.innerHTML = collapsed + body;
 }
+
+function cardOffline(kind) { LAST_CARD_SIG = "offline" + (kind === "cors" ? ":cors" : ""); paintCard(null, {kind: "offline", cors: kind === "cors"}); }
+function cardNoData(display) { LAST_CARD_SIG = "nodata|" + display; paintCard(display, {kind: "nodata", display}); }
+
+// Interactive calls show a loading state and always paint; silent (poll) calls
+// repaint only when the signature changed, so there's no flicker.
+async function renderCard(display, opts) {
+  opts = opts || {};
+  SELECTED_DISPLAY = display;
+  if (!opts.silent) {
+    cardEl.className = "card loading";
+    cardEl.innerHTML = '<div class="card-body"><div class="verdict">Loading ' + esc(display) + '…</div></div>';
+  }
+  const m = await loadCardModel(display);
+  const sig = cardSig(display, m);
+  if (opts.silent && sig === LAST_CARD_SIG) return;   // nothing changed
+  LAST_CARD_SIG = sig;
+  paintCard(display, m);
+}
+
+// Toggle the mobile collapsed/expanded card (desktop always shows the full card).
+cardEl.addEventListener("click", (e) => {
+  if (!e.target.closest(".card-collapsed") || !cardEl.classList.contains("ok")) return;
+  cardExpanded = !cardEl.classList.contains("open");
+  cardEl.classList.toggle("open", cardExpanded);
+  const cc = cardEl.querySelector(".card-collapsed");
+  if (cc) cc.setAttribute("aria-expanded", cardExpanded ? "true" : "false");
+  try { sessionStorage.setItem("cardExpanded", cardExpanded ? "1" : "0"); } catch (e2) {}
+});
 
 function populateCountries() {
   const countries = [...new Set(PANEL_CITIES.map(c => c.country))].sort((a, b) => a.localeCompare(b));
   countrySel.innerHTML = countries.map(c => '<option value="' + esc(c) + '">' + esc(c) + '</option>').join("");
 }
+// Cities with data first (alphabetical), then "dark" cities from /v2/cities/
+// with no recent data, greyed and suffixed. Returns the first WITH-DATA key.
 function populateCities(country) {
-  const list = PANEL_CITIES.filter(c => c.country === country).sort((a, b) => a.display.localeCompare(b.display));
-  citySel.innerHTML = list.map(c => '<option value="' + esc(c.key) + '">' + esc(c.display) + '</option>').join("");
-  return list.length ? list[0].key : null;
+  const inC = PANEL_CITIES.filter(c => c.country === country);
+  const data = inC.filter(c => !c.dark).sort((a, b) => a.display.localeCompare(b.display));
+  const dark = inC.filter(c => c.dark).sort((a, b) => a.display.localeCompare(b.display));
+  citySel.innerHTML =
+    data.map(c => '<option value="' + esc(c.key) + '">' + esc(c.display) + '</option>').join("") +
+    dark.map(c => '<option value="' + esc(c.key) + '" class="dark-opt" style="color:#9aa79c">' +
+      esc(c.display) + ' (no recent data)</option>').join("");
+  return data.length ? data[0].key : (dark.length ? dark[0].key : null);
 }
 function selectCity(key) {
   const entry = PANEL_CITIES.find(c => c.key === key);
@@ -1028,34 +1159,46 @@ function selectCity(key) {
   if (countrySel.value !== entry.country) { countrySel.value = entry.country; populateCities(entry.country); }
   citySel.value = key;
   lastCity = entry.display;   // chat context follows the picker
-  renderCard(entry.display);
+  renderCard(entry.display);  // a dark city resolves to the no-data card
 }
 
-// Build the picker from cities that actually have data; default to the city
-// with the most sensors, or the ?city=<slug> deep-link if it resolves.
+// Build the picker: cities with data (for defaults/chips) plus "dark" cities
+// from /v2/cities/ with no data. Default to the most-sensors city with data,
+// or the ?city=<slug> deep-link if it resolves.
 async function initPanel(preselectSlug) {
   cardEl.className = "card loading";
   let merged;
   try { merged = await combinedCityMap(); }
   catch (e) { return cardOffline(e && e.kind); }
   const cities = [...merged.values()].filter(g => g.pm25 != null || g.pm10 != null);
-  if (!cities.length) { countrySel.innerHTML = ""; citySel.innerHTML = ""; return cardNoData("any city"); }
-  PANEL_CITIES = cities.map(g => {
+  const withData = new Map();
+  cities.forEach(g => {
     const m = CITY_META.get(g.key) || {};
-    return {
-      key: g.key, display: g.display, sensors: g.sensors,
+    withData.set(g.key, {
+      key: g.key, display: g.display, sensors: g.sensors, dark: false,
       country: countryLabel(m.country || g.country || ""),
       slug: strip((m.slug || "") || g.key)
-    };
+    });
   });
+  // Dark cities: in the /v2/cities/ list but absent from every data window.
+  const dark = [];
+  for (const [k, m] of CITY_META) {
+    if (withData.has(k)) continue;
+    dark.push({key: k, display: m.display, sensors: -1, dark: true,
+               country: countryLabel(m.country || ""), slug: strip((m.slug || "") || k)});
+  }
+  PANEL_CITIES = [...withData.values(), ...dark];
+  if (!PANEL_CITIES.length) { countrySel.innerHTML = ""; citySel.innerHTML = ""; return cardNoData("any city"); }
   populateCountries();
+
   let target = null;
   if (preselectSlug) {
     const skey = CITY_BY_SLUG.get(strip(preselectSlug));
     target = PANEL_CITIES.find(c => c.key === skey) || PANEL_CITIES.find(c => c.slug === strip(preselectSlug));
   }
-  if (!target) target = PANEL_CITIES.slice()
+  if (!target) target = [...withData.values()]
     .sort((a, b) => (b.sensors - a.sensors) || a.display.localeCompare(b.display))[0];
+  if (!target) target = PANEL_CITIES[0];   // only dark cities exist
   countrySel.value = target.country;
   populateCities(target.country);
   selectCity(target.key);
@@ -1066,11 +1209,27 @@ countrySel.addEventListener("change", () => {
   if (firstKey) selectCity(firstKey);
 });
 citySel.addEventListener("change", () => selectCity(citySel.value));
+
+/* ---------- auto-refresh (every 5 min while visible) ---------- */
+
+// Drop the cached data files so the next read refetches. Polling on the same
+// 5-minute cadence as the cache means we never fetch more often than that.
+function clearDataCache() { for (const k of [...cache.keys()]) if (k.startsWith("grp:")) cache.delete(k); }
+let lastPollAt = Date.now();
+async function refreshData() {
+  lastPollAt = Date.now();
+  clearDataCache();
+  if (SELECTED_DISPLAY) await renderCard(SELECTED_DISPLAY, {silent: true});  // repaint only if changed
+  else await initPanel(PARAMS.get("city"));   // recover the picker if we were offline
+  await refreshChips();
+}
 refreshBtn.addEventListener("click", () => {
   refreshBtn.classList.remove("spin"); void refreshBtn.offsetWidth; refreshBtn.classList.add("spin");
-  const entry = PANEL_CITIES.find(c => c.key === SELECTED_KEY);
-  if (entry) renderCard(entry.display);   // re-reads through the 5-minute cache
-  else initPanel();
+  refreshData();
+});
+setInterval(() => { if (!document.hidden) refreshData(); }, 5 * 60 * 1000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && Date.now() - lastPollAt >= 5 * 60 * 1000) refreshData();
 });
 
 // Preselect ?city=<slug> if present; otherwise the highest-traffic city.
